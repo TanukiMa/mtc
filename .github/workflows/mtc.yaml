@@ -1,0 +1,104 @@
+name: Advanced Medical Term Crawler
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      max_workers:
+        description: 'Maximum number of worker threads'
+        required: false
+        default: '15'
+      max_depth:
+        description: 'Maximum crawl depth'
+        required: false
+        default: '4'
+
+jobs:
+  crawler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y libreoffice-headless poppler-utils
+
+      - name: Setup Sudachi
+        run: |
+          ./scripts/setup_sudachi.sh
+
+      - name: Run crawler (Shard ${{ matrix.shard }})
+        run: |
+          python src/advanced_crawler.py --shard ${{ matrix.shard }} --total-shards 3
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          MAX_WORKERS: ${{ github.event.inputs.max_workers || '15' }}
+          MAX_DEPTH: ${{ github.event.inputs.max_depth || '4' }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: crawler-results-shard-${{ matrix.shard }}
+          path: |
+            logs/
+            results/
+
+  analyzer:
+    needs: crawler
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python and Java
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: crawler-results-shard-*
+          merge-multiple: true
+
+      - name: Run morphological analysis
+        run: |
+          python src/morphological_analyzer.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      - name: Run term validation
+        run: |
+          python src/database_handler.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
