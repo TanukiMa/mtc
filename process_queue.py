@@ -3,6 +3,7 @@ import re
 import os
 import configparser
 import requests
+import hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 
@@ -14,13 +15,14 @@ from sudachipy import tokenizer, dictionary
 _WORKER_TOKENIZER = None
 
 # --- テキスト抽出・解析関連の関数群 ---
+def get_content_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
 def clean_text(text: str) -> str:
-    """テキストから不要な改行やスペースを削除・整形する"""
     if not text: return ""
     return re.sub(r'\s+', ' ', text).strip()
 
 def get_text_from_html(content: bytes) -> str:
-    """HTMLコンテンツからテキストのみを抽出する"""
     try:
         soup = BeautifulSoup(content, 'html.parser')
         for s in soup(['script', 'style']): s.decompose()
@@ -30,7 +32,6 @@ def get_text_from_html(content: bytes) -> str:
         raise RuntimeError(f"HTML解析エラー: {e}")
 
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
-    """sudachipyを使い、未知の普通名詞を抽出する"""
     if not text.strip() or not tokenizer_obj: return []
     chunk_size = 40000
     words = []
@@ -45,12 +46,11 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
 
 # --- 各ワーカープロセスで実行される本体 ---
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int):
-    """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
 
-    url = queue_item['url']
+    url_id, url = queue_item['id'], queue_item['url']
     print(f"[*] ワーカー (PID: {os.getpid()}) が処理開始: {url}")
     supabase: Client = create_client(supabase_url, supabase_key)
 
@@ -59,14 +59,28 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
         response = requests.get(url, timeout=request_timeout, headers=headers)
         response.raise_for_status()
 
+        # コンテンツタイプがHTMLでなければ、'completed' にして終了
         content_type = response.headers.get("content-type", "").lower()
         if "html" not in content_type:
             print(f"  [-] HTMLでないためスキップ: {content_type}")
             supabase.table("crawl_queue").update({
                 "status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()
-            }).eq("id", queue_item['id']).execute()
+            }).eq("id", url_id).execute()
             return True
 
+        # ハッシュ値を比較し、変更がなければ 'completed' にして終了
+        new_hash = get_content_hash(response.content)
+        db_res = supabase.table("crawl_queue").select("content_hash").eq("id", url_id).single().execute()
+        old_hash = db_res.data.get("content_hash") if db_res.data else None
+        
+        if old_hash == new_hash:
+            print(f"  [-] コンテンツ変更なし。スキップします。")
+            supabase.table("crawl_queue").update({
+                "status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", url_id).execute()
+            return True
+        
+        print(f"  [+] 新規または更新されたHTMLコンテンツを解析します。")
         text = get_text_from_html(response.content)
         
         if text:
@@ -84,21 +98,23 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
                             "word_id": word_id, "source_url": url
                         }).execute()
 
+        # 成功: ステータスと新しいハッシュ値を記録
         supabase.table("crawl_queue").update({
-            "status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()
-        }).eq("id", queue_item['id']).execute()
+            "status": "completed", 
+            "content_hash": new_hash,
+            "processed_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", url_id).execute()
         return True
 
     except Exception as e:
         print(f"  [!] エラー発生: {url} - {e}")
         supabase.table("crawl_queue").update({
             "status": "failed", "processed_at": datetime.now(timezone.utc).isoformat(), "error_message": str(e)
-        }).eq("id", queue_item['id']).execute()
+        }).eq("id", url_id).execute()
         return False
 
-# --- メイン処理 (キューの管理とワーカーへのディスパッチ) ---
+# --- メイン処理 ---
 def main():
-    """キューからURLを取得し、プロセスプールに処理を依頼する"""
     config = configparser.ConfigParser()
     config.read('config.ini')
     
@@ -118,9 +134,9 @@ def main():
 
     total_processed_count = 0
     
-    # キューが空になるまでバッチ処理を繰り返す
     while True:
-        response = supabase_main.table("crawl_queue").select("id, url").eq("status", "queued").limit(process_batch_size).execute()
+        # 'queued' または 'failed' (再試行のため) のURLを取得
+        response = supabase_main.table("crawl_queue").select("id, url").in_("status", ["queued", "failed"]).limit(process_batch_size).execute()
         urls_to_process = response.data
         
         if not urls_to_process:
