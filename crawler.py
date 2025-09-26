@@ -19,9 +19,10 @@ from sudachipy import dictionary
 # --- 設定項目 ---
 START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
-MAX_URLS_TO_CRAWL = 2000000000000
+# 0 を設定すると、処理URL数の上限なし
+MAX_URLS_TO_CRAWL = 200
 MAX_WORKERS = 8
-RECRAWL_DAYS = 0
+RECRAWL_DAYS = 30
 REQUEST_TIMEOUT = 15
 
 # --- Sudachiの初期化 ---
@@ -86,29 +87,22 @@ def analyze_with_sudachi(text: str) -> list:
     if not text.strip():
         return []
 
-    chunk_size = 40000  # sudachipyのバイト制限(約49KB)より安全に小さい値
+    chunk_size = 40000
     words = []
 
     try:
-        # テキストをチャンクに分割してループ処理
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
-            
-            # 各チャンクを形態素解析
             morphemes = tokenizer_obj.tokenize(chunk)
-            
             for m in morphemes:
                 pos_info = m.part_of_speech()
-                # 未知語(OOV) かつ 品詞が「名詞,普通名詞」のものを抽出
                 if m.is_oov() and pos_info[0] == "名詞" and pos_info[1] == "普通名詞":
-                    # 専門用語として意味をなしやすいよう、2文字以上の単語に限定
                     if len(m.surface()) > 1:
                         words.append({
                             "word": m.surface(),
                             "pos": ",".join(pos_info[0:4])
                         })
     except Exception as e:
-        # sudachipyの内部エラーを捕捉
         print(f"  [!] Sudachi解析エラー: {e}")
 
     return words
@@ -128,7 +122,6 @@ def process_url(url: str, supabase_url: str, supabase_key: str, stop_words_set: 
 
         text = get_text(response.content, content_type)
         if not text:
-            print(f"  [-] テキスト抽出スキップ: {url}")
             return []
 
         new_words = analyze_with_sudachi(text)
@@ -215,7 +208,7 @@ def main():
     urls_to_crawl = {START_URL}
     processed_count = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        while urls_to_crawl and processed_count < MAX_URLS_TO_CRAWL:
+        while urls_to_crawl and (MAX_URLS_TO_CRAWL == 0 or processed_count < MAX_URLS_TO_CRAWL):
             urls_now = list(urls_to_crawl - crawled_urls)
             urls_to_crawl.clear()
             if not urls_now:
@@ -235,11 +228,16 @@ def main():
                     crawled_urls.add(url)
                     supabase_main.table("crawled_urls").insert({"url": url}).execute()
                     processed_count += 1
-                    if processed_count >= MAX_URLS_TO_CRAWL:
+                    
+                    if MAX_URLS_TO_CRAWL > 0 and processed_count >= MAX_URLS_TO_CRAWL:
                         print("[*] 処理上限数に達しました。")
                         break
                 except Exception as e:
                     print(f"[!] future.result()でエラー: {url} - {e}")
+                
+                # 内側のループを抜けた後、外側のループも抜ける必要があるため再度チェック
+                if MAX_URLS_TO_CRAWL > 0 and processed_count >= MAX_URLS_TO_CRAWL:
+                    break
 
     print(f"\n--- クロール処理終了 ---")
     print(f"今回処理したURL数: {processed_count}")
