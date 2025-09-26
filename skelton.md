@@ -1,4 +1,4 @@
-### github runners上でwebクローラー+日本語形態素解析して、新語を探す作業をしたい。可能かな？ 形態素解析には Javaで書かれたSudachiを使いたい。Github runnersには Ubuntuを使いたい。対象は厚労省のサイト。専門用語。既存辞書と照合。実行頻度は定期実行。医療用語や用語の保存や呼び出しには外部sql db(supabase)を使うのはどうか
+### 下記方針に沿って、各 pythonのcodeを提案して ### github runners上でwebクローラー+日本語形態素解析して、新語を探す作業をしたい。可能かな？ 形態素解析には Javaで書かれたSudachiを使いたい。Github runnersには Ubuntuを使いたい。対象は厚労省のサイト。専門用語。既存辞書と照合。実行頻度は定期実行。医療用語や用語の保存や呼び出しには外部sql db(supabase)を使うのはどうか
 
 ```yaml
 name: Medical Term Crawler and Analysis
@@ -3188,3 +3188,701 @@ mtc/
 この方がメンテナンスしやすく、テストも書きやすくなります。
 
 ### 
+
+
+```bash
+# プロジェクトディレクトリ作成
+mkdir mtc
+cd mtc
+
+# Git初期化
+git init
+
+# ディレクトリ構造作成
+mkdir -p .github/workflows
+mkdir -p src
+mkdir -p scripts
+mkdir -p tests
+mkdir -p docs
+
+# .gitignore作成
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+logs/
+results/
+temp/
+sudachi/
+*.log
+*.tmp
+analysis_results.json
+crawled_content.txt
+new_terms.txt
+
+# Secrets
+.env
+config.json
+secrets.yaml
+EOF
+
+# requirements.txt作成
+cat > requirements.txt << 'EOF'
+supabase==1.0.4
+aiohttp[speedups]==3.9.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+python-docx==0.8.11
+python-pptx==0.6.21
+PyPDF2==3.0.1
+aiofiles==23.2.1
+asyncio-throttle==1.0.2
+EOF
+
+# README.md作成
+cat > README.md << 'EOF'
+# Medical Term Crawler (MTC)
+
+厚労省サイトから医療用語を自動収集・解析するシステム
+
+## 概要
+- 厚生労働省のWebサイトを定期的にクロール
+- 日本語形態素解析（Sudachi）による専門用語抽出
+- 新規医療用語の自動発見
+- Supabaseによるデータ管理
+
+## セットアップ
+
+### 1. 環境変数設定
+GitHub Secretsに以下を設定:
+```
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+```
+
+### 2. 手動実行
+```bash
+gh workflow run medical-term-crawler.yml
+```
+
+## アーキテクチャ
+- 並列クロール（シャード分散）
+- 非同期処理による高速化
+- PDF/DOCX/PPTX対応
+- 重複回避機構
+
+## ライセンス
+MIT
+EOF
+
+# GitHub workflow作成
+cat > .github/workflows/medical-term-crawler.yml << 'EOF'
+name: Medical Term Crawler
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      max_workers:
+        description: 'Maximum worker threads'
+        required: false
+        default: '15'
+      max_depth:
+        description: 'Maximum crawl depth'
+        required: false
+        default: '4'
+
+jobs:
+  crawler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y libreoffice-headless poppler-utils
+      
+      - name: Setup Sudachi
+        run: |
+          chmod +x scripts/setup_sudachi.sh
+          ./scripts/setup_sudachi.sh
+      
+      - name: Run crawler
+        run: |
+          python src/advanced_crawler.py \
+            --shard ${{ matrix.shard }} \
+            --total-shards 3 \
+            --max-workers ${{ github.event.inputs.max_workers || '15' }} \
+            --max-depth ${{ github.event.inputs.max_depth || '4' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-shard-${{ matrix.shard }}
+          path: results/
+
+  analyzer:
+    needs: crawler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+      
+      - run: pip install -r requirements.txt
+      
+      - name: Setup Sudachi
+        run: |
+          chmod +x scripts/setup_sudachi.sh
+          ./scripts/setup_sudachi.sh
+      
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-shard-*
+          merge-multiple: true
+      
+      - name: Analyze terms
+        run: python src/morphological_analyzer.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      
+      - name: Update database
+        run: python src/database_handler.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+EOF
+
+# Sudachiセットアップスクリプト
+cat > scripts/setup_sudachi.sh << 'EOF'
+#!/bin/bash
+set -e
+
+SUDACHI_VERSION="0.7.3"
+DICT_VERSION="20231110"
+
+mkdir -p sudachi
+cd sudachi
+
+# Download Sudachi
+if [ ! -f "sudachi-${SUDACHI_VERSION}-executable.jar" ]; then
+    wget -q https://github.com/WorksApplications/Sudachi/releases/download/v${SUDACHI_VERSION}/sudachi-${SUDACHI_VERSION}-executable.jar
+fi
+
+# Download dictionary
+if [ ! -f "system_full.dic" ]; then
+    wget -q https://github.com/WorksApplications/SudachiDict/releases/download/v${DICT_VERSION}/sudachi-dictionary-${DICT_VERSION}-full.zip
+    unzip -q sudachi-dictionary-${DICT_VERSION}-full.zip
+    rm sudachi-dictionary-${DICT_VERSION}-full.zip
+fi
+
+# Create config
+cat > sudachi.json << 'JSON'
+{
+  "systemDict": "system_full.dic",
+  "characterDefinitionFile": "char.def",
+  "inputTextPlugin": [
+    {"class": "com.worksap.nlp.sudachi.DefaultInputTextPlugin"}
+  ],
+  "oovProviderPlugin": [
+    {
+      "class": "com.worksap.nlp.sudachi.MeCabOovProviderPlugin",
+      "charDef": "char.def",
+      "unkDef": "unk.def"
+    }
+  ],
+  "pathRewritePlugin": [
+    {"class": "com.worksap.nlp.sudachi.JoinNumericPlugin"},
+    {"class": "com.worksap.nlp.sudachi.JoinKatakanaOovPlugin"}
+  ]
+}
+JSON
+
+cd ..
+EOF
+
+chmod +x scripts/setup_sudachi.sh
+
+# src/__init__.py
+touch src/__init__.py
+
+# 初期コミット
+git add .
+git commit -m "Initial commit: Setup MTC project structure"
+
+# GitHubリポジトリ作成
+gh repo create mtc --private --description "Medical Term Crawler - 医療用語自動収集システム"
+
+# プッシュ
+git push -u origin main
+
+# Secrets設定
+echo "以下のコマンドでSecretsを設定してください："
+echo "gh secret set SUPABASE_URL --body \"your_supabase_url\""
+echo "gh secret set SUPABASE_ANON_KEY --body \"your_supabase_anon_key\""
+```
+
+これでプロジェクトの基本構造が完成します。次はPythonソースファイル（src/advanced_crawler.py等）を作成しますか？
+
+### advanced_crawler.py を作成して下さい。
+
+
+```python
+# src/advanced_crawler.py
+import asyncio
+import aiohttp
+import aiofiles
+import hashlib
+import os
+import tempfile
+import json
+import logging
+import argparse
+import signal
+import sys
+from urllib.parse import urljoin, urlparse, quote
+from urllib.robotparser import RobotFileParser
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from supabase import create_client, Client
+import PyPDF2
+from docx import Document
+from pptx import Presentation
+from typing import Set, List, Dict, Optional, Tuple
+from datetime import datetime, timedelta
+import time
+import re
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+import random
+
+# ログ設定
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/crawler.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class CrawlJob:
+    """クロールジョブ"""
+    url: str
+    depth: int
+    priority: int = 0
+    parent_url: str = ""
+    retry_count: int = 0
+    discovered_at: float = field(default_factory=time.time)
+    
+    def __lt__(self, other):
+        return (self.priority, self.discovered_at) < (other.priority, other.discovered_at)
+
+@dataclass
+class CrawlStats:
+    """クロール統計"""
+    start_time: float = field(default_factory=time.time)
+    processed: int = 0
+    errors: int = 0
+    documents_saved: int = 0
+    links_discovered: int = 0
+    retries: int = 0
+    skipped: int = 0
+    
+    @property
+    def runtime(self) -> float:
+        return time.time() - self.start_time
+    
+    @property
+    def rate(self) -> float:
+        return self.processed / self.runtime if self.runtime > 0 else 0
+    
+    def log_progress(self):
+        """進捗をログ出力"""
+        logger.info(
+            f"Progress: {self.processed} processed, {self.errors} errors, "
+            f"{self.documents_saved} saved, {self.rate:.2f} docs/sec, "
+            f"Runtime: {self.runtime/60:.1f} min"
+        )
+
+class ContentExtractor:
+    """コンテンツ抽出クラス"""
+    
+    @staticmethod
+    async def extract_text(content: bytes, content_type: str, url: str) -> str:
+        """非同期でテキストを抽出"""
+        loop = asyncio.get_event_loop()
+        
+        try:
+            if 'text/html' in content_type:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    return await loop.run_in_executor(
+                        executor, ContentExtractor._extract_html, content
+                    )
+            elif 'application/pdf' in content_type:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    return await loop.run_in_executor(
+                        executor, ContentExtractor._extract_pdf, content
+                    )
+            elif any(ct in content_type for ct in ['wordprocessingml', 'msword']):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    return await loop.run_in_executor(
+                        executor, ContentExtractor._extract_docx, content
+                    )
+            elif any(ct in content_type for ct in ['presentationml', 'ms-powerpoint']):
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    return await loop.run_in_executor(
+                        executor, ContentExtractor._extract_pptx, content
+                    )
+        except Exception as e:
+            logger.error(f"Text extraction error for {url}: {e}")
+        
+        return ""
+    
+    @staticmethod
+    def _extract_html(content: bytes) -> str:
+        """HTMLからテキスト抽出"""
+        try:
+            # エンコーディング検出
+            encoding = 'utf-8'
+            if b'charset=' in content[:1024]:
+                match = re.search(rb'charset=(["\']?)([^"\'>]+)', content[:1024])
+                if match:
+                    encoding = match.group(2).decode('ascii', errors='ignore')
+            
+            html = content.decode(encoding, errors='ignore')
+            soup = BeautifulSoup(html, 'lxml')
+            
+            # 不要要素削除
+            for tag in ['script', 'style', 'nav', 'header', 'footer', 'aside', 'form']:
+                for element in soup.find_all(tag):
+                    element.decompose()
+            
+            # メインコンテンツ取得
+            main_content = None
+            for selector in ['main', 'article', '.main-content', '#content']:
+                main_content = soup.select_one(selector)
+                if main_content:
+                    break
+            
+            if main_content:
+                text = main_content.get_text(separator='\n', strip=True)
+            else:
+                text = soup.get_text(separator='\n', strip=True)
+            
+            # テキスト正規化
+            text = re.sub(r'\n{3,}', '\n\n', text)
+            text = re.sub(r' {2,}', ' ', text)
+            
+            return text.strip()
+        except Exception as e:
+            logger.debug(f"HTML extraction error: {e}")
+            return ""
+    
+    @staticmethod
+    def _extract_pdf(content: bytes) -> str:
+        """PDFからテキスト抽出"""
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                
+                text_parts = []
+                with open(tmp_file.name, 'rb') as file:
+                    reader = PyPDF2.PdfReader(file)
+                    max_pages = min(len(reader.pages), 100)
+                    
+                    for page_num in range(max_pages):
+                        try:
+                            page = reader.pages[page_num]
+                            page_text = page.extract_text()
+                            if page_text:
+                                text_parts.append(page_text)
+                        except Exception:
+                            continue
+                
+                os.unlink(tmp_file.name)
+                return '\n'.join(text_parts)
+        except Exception as e:
+            logger.debug(f"PDF extraction error: {e}")
+            return ""
+    
+    @staticmethod
+    def _extract_docx(content: bytes) -> str:
+        """DOCXからテキスト抽出"""
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                
+                doc = Document(tmp_file.name)
+                paragraphs = []
+                
+                for paragraph in doc.paragraphs:
+                    if paragraph.text.strip():
+                        paragraphs.append(paragraph.text.strip())
+                
+                # テーブルからも抽出
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_text:
+                            paragraphs.append(' | '.join(row_text))
+                
+                os.unlink(tmp_file.name)
+                return '\n'.join(paragraphs)
+        except Exception as e:
+            logger.debug(f"DOCX extraction error: {e}")
+            return ""
+    
+    @staticmethod
+    def _extract_pptx(content: bytes) -> str:
+        """PPTXからテキスト抽出"""
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.pptx', delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                
+                prs = Presentation(tmp_file.name)
+                text_parts = []
+                
+                for slide_num, slide in enumerate(prs.slides):
+                    slide_texts = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text:
+                            slide_texts.append(shape.text.strip())
+                    
+                    if slide_texts:
+                        text_parts.append(f"\n--- Slide {slide_num + 1} ---\n")
+                        text_parts.extend(slide_texts)
+                
+                os.unlink(tmp_file.name)
+                return '\n'.join(text_parts)
+        except Exception as e:
+            logger.debug(f"PPTX extraction error: {e}")
+            return ""
+
+class MHLWCrawler:
+    """厚労省サイトクローラー"""
+    
+    def __init__(self, shard_id: int = 1, total_shards: int = 1, 
+                 max_workers: int = 15, max_depth: int = 4):
+        # 設定
+        self.shard_id = shard_id
+        self.total_shards = total_shards
+        self.max_workers = max_workers
+        self.max_depth = max_depth
+        self.base_url = "https://www.mhlw.go.jp"
+        
+        # Supabase
+        self.supabase = create_client(
+            os.getenv("SUPABASE_URL"),
+            os.getenv("SUPABASE_ANON_KEY")
+        )
+        
+        # 状態管理
+        self.crawled_urls: Set[str] = set()
+        self.processing_urls: Set[str] = set()
+        self.failed_urls: Dict[str, int] = {}
+        self.url_queue = asyncio.PriorityQueue(maxsize=5000)
+        
+        # 制御
+        self.semaphore = asyncio.Semaphore(max_workers)
+        self.download_semaphore = asyncio.Semaphore(max(max_workers // 2, 1))
+        self.shutdown_event = asyncio.Event()
+        
+        # 統計
+        self.stats = CrawlStats()
+        
+        # robots.txt
+        self.robots_parser = None
+        
+        # レート制限
+        self.domain_delays = {}
+        self.min_delay = 0.5
+        self.max_delay = 2.0
+        
+        # 出力ディレクトリ
+        os.makedirs('logs', exist_ok=True)
+        os.makedirs('results', exist_ok=True)
+        
+        # シグナルハンドラ
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """シグナルハンドラ"""
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        self.shutdown_event.set()
+    
+    async def initialize(self):
+        """初期化"""
+        logger.info(f"Initializing crawler (shard {self.shard_id}/{self.total_shards})...")
+        
+        # 既存URL読み込み
+        await self._load_crawled_urls()
+        
+        # robots.txt読み込み
+        await self._load_robots_txt()
+        
+        logger.info(f"Initialization complete. {len(self.crawled_urls)} URLs already crawled.")
+    
+    async def _load_crawled_urls(self):
+        """クロール済みURL読み込み"""
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.supabase.table('crawled_urls').select('url').execute()
+            )
+            self.crawled_urls = {row['url'] for row in result.data}
+        except Exception as e:
+            logger.error(f"Error loading crawled URLs: {e}")
+    
+    async def _load_robots_txt(self):
+        """robots.txt読み込み"""
+        try:
+            self.robots_parser = RobotFileParser()
+            self.robots_parser.set_url(f"{self.base_url}/robots.txt")
+            await asyncio.get_event_loop().run_in_executor(
+                None, self.robots_parser.read
+            )
+        except Exception as e:
+            logger.warning(f"Could not load robots.txt: {e}")
+    
+    def can_fetch(self, url: str) -> bool:
+        """robots.txtチェック"""
+        if not self.robots_parser:
+            return True
+        try:
+            return self.robots_parser.can_fetch("*", url)
+        except:
+            return True
+    
+    async def start_crawling(self):
+        """クロール開始"""
+        await self.initialize()
+        
+        logger.info("Starting crawl...")
+        
+        # エントリーポイント
+        entry_points = [
+            (f"{self.base_url}/", 0, 1),
+            (f"{self.base_url}/stf/", 0, 2),
+            (f"{self.base_url}/stf/seisakunitsuite/bunya/kenkou_iryou/", 0, 3),
+            (f"{self.base_url}/content/", 0, 2),
+            (f"{self.base_url}/file/", 0, 2),
+            (f"{self.base_url}/topics/", 0, 2),
+            (f"{self.base_url}/houdou/", 0, 2),
+            (f"{self.base_url}/shingi/", 0, 2),
+            (f"{self.base_url}/bunya/", 0, 2),
+        ]
+        
+        # シャード分散
+        for i, (url, depth, priority) in enumerate(entry_points):
+            if i % self.total_shards == (self.shard_id - 1):
+                await self.url_queue.put(CrawlJob(url, depth, priority))
+        
+        # ワーカー起動
+        workers = []
+        for i in range(self.max_workers):
+            worker = asyncio.create_task(self._worker(f"Worker-{i}"))
+            workers.append(worker)
+        
+        # 統計レポータ
+        stats_task = asyncio.create_task(self._stats_reporter())
+        
+        try:
+            # ワーカー完了待機
+            await asyncio.gather(*workers)
+        finally:
+            stats_task.cancel()
+            await self._save_results()
+        
+        logger.info(f"Crawl completed. {self.stats.processed} URLs processed.")
+    
+    async def _worker(self, name: str):
+        """ワーカータスク"""
+        logger.debug(f"{name} started")
+        
+        connector = aiohttp.TCPConnector(
+            limit=30,
+            limit_per_host=5,
+            ttl_dns_cache=300
+        )
+        
+        timeout = aiohttp.ClientTimeout(total=60, connect=10)
+        
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (compatible; MedicalTermBot/1.0)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'ja,en;q=0.9'
+            }
+        ) as session:
+
