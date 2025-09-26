@@ -1,0 +1,8 @@
+{
+  "systemDict": "~/.sudachi/system.dic",
+  "characterDefinitionFile": "char.def",
+  "inputTextPlugin": [],
+  "oovProviderPlugin": [],
+  "pathRewritePlugin": [],
+  "connectPlugin": []
+}
