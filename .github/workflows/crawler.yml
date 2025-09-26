@@ -336,81 +336,212 @@ jobs:
         from supabase import create_client
         
         print("📡 Supabase接続中...")
-        client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
         
-        # 厚労省・医療分野の基本辞書語彙
-        basic_words = [
-            {'word': '医療', 'reading': 'イリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '厚生労働省', 'reading': 'コウセイロウドウショウ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '健康', 'reading': 'ケンコウ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '診療', 'reading': 'シンリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '薬事', 'reading': 'ヤクジ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '保険', 'reading': 'ホケン', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '介護', 'reading': 'カイゴ', 'part_of_speech': '名詞', 'source': 'basic'},
-            {'word': '福祉', 'reading': 'フクシ', 'part_of_speech': '名詞', 'source': 'basic'}
-        ]
+        # 環境変数確認
+        supabase_url = os.environ.get('SUPABASE_URL')
+        supabase_key = os.environ.get('SUPABASE_KEY')
+        
+        if not supabase_url or not supabase_key:
+            print("❌ Supabase認証情報が不足しています")
+            exit(1)
+        
+        print(f"🔑 使用中のキー: {'service_role' if len(supabase_key) > 100 else 'anon'}タイプ")
         
         try:
-            # 既存チェック
-            existing = client.table('dictionary_words').select('word').limit(1).execute()
-            if not existing.data:
-                client.table('dictionary_words').insert(basic_words).execute()
-                print(f"✅ 基本辞書を初期化しました ({len(basic_words)}語)")
+            client = create_client(supabase_url, supabase_key)
+            
+            # 接続テスト（読み取り）
+            print("📖 接続テスト中...")
+            test_read = client.table('dictionary_words').select('id').limit(1).execute()
+            print(f"✅ 読み取り成功: {len(test_read.data)}件")
+            
+            # 厚労省・医療分野の基本辞書語彙
+            basic_words = [
+                {'word': '医療', 'reading': 'イリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '厚生労働省', 'reading': 'コウセイロウドウショウ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '健康', 'reading': 'ケンコウ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '診療', 'reading': 'シンリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '薬事', 'reading': 'ヤクジ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '保険', 'reading': 'ホケン', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '介護', 'reading': 'カイゴ', 'part_of_speech': '名詞', 'source': 'basic'},
+                {'word': '福祉', 'reading': 'フクシ', 'part_of_speech': '名詞', 'source': 'basic'}
+            ]
+            
+            # 既存データ確認
+            existing_count = client.table('dictionary_words').select('id', count='exact').execute()
+            print(f"📊 既存辞書語彙数: {existing_count.count}語")
+            
+            if existing_count.count == 0:
+                print("📝 基本辞書初期化中...")
+                
+                # RLSエラー対策：一つずつ挿入してエラーハンドリング
+                successful_inserts = 0
+                for word_data in basic_words:
+                    try:
+                        result = client.table('dictionary_words').insert(word_data).execute()
+                        if result.data:
+                            successful_inserts += 1
+                    except Exception as word_error:
+                        print(f"⚠️  単語挿入失敗 '{word_data['word']}': {word_error}")
+                
+                if successful_inserts > 0:
+                    print(f"✅ 基本辞書を部分的に初期化しました ({successful_inserts}/{len(basic_words)}語)")
+                else:
+                    print("⚠️  基本辞書の初期化に失敗しました（RLSポリシー問題の可能性）")
+                    print("💡 ヒント: service_roleキーを使用することを推奨します")
             else:
                 print("ℹ️  辞書は既に初期化済みです")
             
-            # 統計情報
-            total_dict_words = client.table('dictionary_words').select('id', count='exact').execute()
-            print(f"📊 現在の辞書語彙数: {total_dict_words.count}語")
+            # 最終統計
+            final_count = client.table('dictionary_words').select('id', count='exact').execute()
+            print(f"📚 現在の辞書語彙数: {final_count.count}語")
             
         except Exception as e:
-            print(f"⚠️  辞書初期化エラー: {e}")
-            import traceback
-            traceback.print_exc()
+            error_msg = str(e)
+            print(f"❌ Supabase操作エラー: {error_msg}")
+            
+            # RLSエラーの診断
+            if "row-level security policy" in error_msg:
+                print("🔒 RLS (Row Level Security) ポリシーエラーが検出されました")
+                print("🔧 解決方法:")
+                print("  1. GitHub SecretsでSUPABASE_KEYをservice_roleキーに変更")
+                print("  2. または Supabaseで適切なRLSポリシーを設定")
+                print("  3. 詳細: https://supabase.com/docs/guides/auth/row-level-security")
+            
+            # エラーでも処理継続（辞書なしでも動作可能）
+            print("⚠️  辞書初期化をスキップして処理を継続します")
+            
+        print("✅ Supabase辞書初期化ステップ完了")
         EOF
-        
-        echo "✅ Supabase辞書初期化完了"
     
-    - name: Run MHLW crawler with SudachiDict-full
+    - name: Run MHLW crawler (with enhanced debugging)
       env:
         MAX_WORKERS: ${{ github.event.inputs.max_workers || '3' }}
       run: |
         echo "🚀 厚労省サイト解析クローラー実行開始"
+        echo "====================================="
         echo "設定:"
         echo "  - 並列処理数: $MAX_WORKERS"
         echo "  - 辞書: SudachiDict-full (170万語)"
         echo "  - 対象: 厚労省サイト（HTML, PDF, DOCX, PPTX）"
+        echo "  - LLMモデル: $LLAMA_MODEL_PATH"
+        echo "  - Supabase: ${SUPABASE_URL:0:30}..."
+        echo ""
+        
+        # Pythonパス確認
+        echo "🐍 Python環境確認:"
+        python --version
+        which python
+        echo "PYTHONPATH: ${PYTHONPATH:-未設定}"
+        
+        # 必要なファイルの存在確認
+        echo "📁 ファイル確認:"
+        if [ -f "main_crawler.py" ]; then
+            echo "✅ main_crawler.py 存在"
+            head -5 main_crawler.py
+        else
+            echo "❌ main_crawler.py が見つかりません"
+            echo "📂 現在のディレクトリ内容:"
+            ls -la
+            echo "❌ クローラー実行を停止します"
+            exit 1
+        fi
+        
+        echo ""
+        echo "🎯 クローラー実行開始..."
+        echo "======================"
         
         python3 << 'EOF'
         import sys
         import os
         import traceback
         from datetime import datetime
+        import importlib.util
         
-        sys.path.append('.')
+        print(f"🕒 実行開始時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🔧 Python版: {sys.version}")
+        print(f"📂 作業ディレクトリ: {os.getcwd()}")
+        print(f"🛣️  Python Path: {sys.path[:3]}...")
         
-        print(f"🕒 開始時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # main_crawler.pyの存在確認
+        crawler_path = os.path.join(os.getcwd(), 'main_crawler.py')
+        if not os.path.exists(crawler_path):
+            print(f"❌ {crawler_path} が存在しません")
+            print("📂 ディレクトリ内容:")
+            for item in os.listdir('.'):
+                print(f"  - {item}")
+            sys.exit(1)
         
+        # モジュールのインポート確認
         try:
+            print("📦 依存関係インポートテスト...")
+            
+            # 主要ライブラリのインポート確認
+            import requests
+            print(f"  ✅ requests: {requests.__version__}")
+            
+            from sudachipy import tokenizer, dictionary
+            print("  ✅ sudachipy: インポート成功")
+            
+            from supabase import create_client
+            print("  ✅ supabase: インポート成功")
+            
+            print("📦 全ての依存関係が利用可能です")
+            
+        except ImportError as e:
+            print(f"❌ 依存関係インポートエラー: {e}")
+            sys.exit(1)
+        
+        # メインクローラーのインポートと実行
+        try:
+            print("🔄 main_crawler モジュールのインポート中...")
+            
+            # sys.pathに現在のディレクトリを追加
+            if os.getcwd() not in sys.path:
+                sys.path.insert(0, os.getcwd())
+            
+            # インポート実行
             from main_crawler import MhlwCrawler
+            print("✅ MhlwCrawler クラスのインポート成功")
             
-            print("🔧 クローラー初期化中...")
+            # クローラーインスタンス作成
+            print("🔧 クローラーインスタンス作成中...")
             crawler = MhlwCrawler()
+            print("✅ クローラーインスタンス作成成功")
             
+            # 実行パラメータ
             max_workers = int(os.environ.get('MAX_WORKERS', '3'))
             print(f"👥 並列処理数: {max_workers}")
             
-            print("📡 クローリング・解析開始...")
+            # *** メイン実行 ***
+            print("🚀 クローリング・解析開始...")
+            print("-" * 40)
+            
             crawler.run(max_workers=max_workers)
             
-            print(f"🕒 完了時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("-" * 40)
+            print(f"🕒 実行完了時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             print("✅ 厚労省サイト解析完了")
             
         except Exception as e:
             print(f"❌ クローラー実行エラー: {e}")
+            print("🔍 詳細なエラー情報:")
             traceback.print_exc()
+            
+            # エラー診断
+            error_str = str(e)
+            if "ModuleNotFoundError" in error_str:
+                print("💡 モジュール不足の可能性があります")
+            elif "Permission" in error_str:
+                print("💡 権限問題の可能性があります")
+            elif "Connection" in error_str:
+                print("💡 ネットワーク接続問題の可能性があります")
+            
             sys.exit(1)
         EOF
+        
+        echo ""
+        echo "🎉 クローラー実行ステップ完了"
     
     - name: Generate detailed analysis report
       if: always()
