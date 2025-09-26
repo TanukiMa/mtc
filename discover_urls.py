@@ -1,6 +1,7 @@
 # discover_urls.py
 import os
 import requests
+import hashlib
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
@@ -8,44 +9,63 @@ from supabase import create_client, Client
 # --- 設定項目 ---
 START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
-# 1回の実行で発見を試みるURLの上限 (0 を設定すると上限なし)
-MAX_URLS_TO_DISCOVER = 500
+MAX_URLS_TO_DISCOVER = 500 # 0で上限なし
 REQUEST_TIMEOUT = 15
 
+def get_content_hash(content: bytes) -> str:
+    """コンテンツのSHA256ハッシュ値を計算する"""
+    return hashlib.sha256(content).hexdigest()
+
 def main():
-    """サイトをクロールし、発見したURLをキューに追加する"""
+    """サイトをクロールし、変更があったURLのみをキューに追加する"""
     supabase_url: str = os.environ.get("SUPABASE_URL")
     supabase_key: str = os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key:
-        raise ValueError("環境変数 SUPABASE_URL と SUPABASE_KEY を設定してください。")
+        raise ValueError("環境変数を設定してください。")
 
     supabase: Client = create_client(supabase_url, supabase_key)
-    print("--- URL発見処理開始 ---")
+    print("--- URL差分検知・発見処理開始 ---")
 
     urls_to_visit = {START_URL}
     visited_urls = set()
-    discovered_count = 0
-
-    while urls_to_visit and (MAX_URLS_TO_DISCOVER == 0 or discovered_count < MAX_URLS_TO_DISCOVER):
+    
+    while urls_to_visit and (MAX_URLS_TO_DISCOVER == 0 or len(visited_urls) < MAX_URLS_TO_DISCOVER):
         url = urls_to_visit.pop()
         if url in visited_urls:
             continue
 
-        print(f"[*] 探索中: {url}")
+        print(f"[*] 検証中: {url}")
         visited_urls.add(url)
-        discovered_count += 1
 
         try:
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+            headers = {'User-Agent': 'Mozilla/5.0'}
             response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers, allow_redirects=True)
             response.raise_for_status()
+            
+            new_hash = get_content_hash(response.content)
 
-            # 発見したURLをキューに追加
-            try:
-                # 既にキューにあれば無視される
-                supabase.table("crawl_queue").upsert({"url": url}, on_conflict="url").execute()
-            except Exception as db_e:
-                print(f"  [!] キューへの追加エラー: {db_e}")
+            # DBから既存のURL情報を取得
+            db_res = supabase.table("crawl_queue").select("content_hash").eq("url", url).maybe_single().execute()
+            
+            # DBにURLが存在しない (新規URL)
+            if db_res.data is None:
+                print(f"  [+] 新規URL発見。キューに追加します。")
+                supabase.table("crawl_queue").insert({
+                    "url": url,
+                    "status": "queued",
+                    "content_hash": new_hash
+                }).execute()
+            # DBにURLが存在する (既存URL)
+            else:
+                old_hash = db_res.data.get("content_hash")
+                if old_hash != new_hash:
+                    print(f"  [+] コンテンツ更新を検知。キューに再追加します。")
+                    supabase.table("crawl_queue").update({
+                        "status": "queued",
+                        "content_hash": new_hash
+                    }).eq("url", url).execute()
+                # else:
+                #     print(f"  [-] コンテンツ変更なし。スキップします。")
 
             # HTMLページからのみリンクを辿る
             content_type = response.headers.get("content-type", "").lower()
@@ -61,8 +81,8 @@ def main():
         except Exception as e:
             print(f"  [!] 不明なエラー: {url} - {e}")
 
-    print(f"\n--- URL発見処理終了 ---")
-    print(f"今回訪問したURL数: {discovered_count}")
+    print(f"\n--- URL差分検知・発見処理終了 ---")
+    print(f"今回訪問したURL数: {len(visited_urls)}")
 
 if __name__ == "__main__":
     main()
