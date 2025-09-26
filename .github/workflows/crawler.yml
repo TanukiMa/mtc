@@ -1,0 +1,249 @@
+name: 厚労省サイト専門用語解析
+
+on:
+  schedule:
+    # 毎日午前2時（JST 11時）に実行
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # 手動実行も可能
+    inputs:
+      max_workers:
+        description: '並列処理数'
+        required: false
+        default: '3'
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+jobs:
+  analyze-mhlw-terms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2時間でタイムアウト
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          openjdk-11-jre-headless \
+          build-essential \
+          cmake \
+          pkg-config
+        
+        # Java環境変数設定
+        echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> $GITHUB_ENV
+        echo "PATH=$PATH:/usr/lib/jvm/java-11-openjdk-amd64/bin" >> $GITHUB_ENV
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install \
+          requests==2.31.0 \
+          beautifulsoup4==4.12.2 \
+          supabase==2.0.2 \
+          sudachipy==0.6.7 \
+          huggingface_hub==0.19.4 \
+          python-docx==0.8.11 \
+          python-pptx==0.6.22 \
+          PyPDF2==3.0.1 \
+          lxml==4.9.3
+    
+    - name: Download Sudachi dictionary
+      run: |
+        mkdir -p ~/.sudachi
+        # Sudachi辞書をダウンロード（公式リポジトリから）
+        wget -O ~/.sudachi/system.dic \
+          https://object-storage.tyo2.conoha.io/v1/nc_2520839e1f9641b08211a5c85243124a/sudachi/sudachi-dictionary-20230110/system_core.dic
+        
+        # 設定ファイル作成
+        cat > ~/.sudachi/sudachi.json << 'EOF'
+        {
+          "systemDict": "~/.sudachi/system.dic",
+          "characterDefinitionFile": "char.def",
+          "inputTextPlugin": [],
+          "oovProviderPlugin": [],
+          "pathRewritePlugin": [],
+          "connectPlugin": []
+        }
+        EOF
+    
+    - name: Install Hugging Face CLI and llama.cpp (from Debian sid)
+      run: |
+        pip install huggingface_hub
+        
+        # Debian sid (unstable) リポジトリを追加してllama.cppをインストール
+        echo "ℹ️  Adding Debian sid repository for llama.cpp package"
+        
+        # sidリポジトリ追加（最小限の影響に限定）
+        echo "deb http://deb.debian.org/debian sid main" | sudo tee /etc/apt/sources.list.d/sid.list
+        
+        # 優先度設定（sidからは必要なパッケージのみ）
+        sudo tee /etc/apt/preferences.d/llama-cpp-pin << 'EOF'
+        Package: llama.cpp llama.cpp-tools
+        Pin: release a=sid
+        Pin-Priority: 500
+        
+        Package: *
+        Pin: release a=sid
+        Pin-Priority: 100
+        EOF
+        
+        # パッケージリスト更新とインストール
+        sudo apt update
+        sudo apt install -y llama.cpp
+        
+        # 動作確認
+        llama-cli --help | head -5
+        echo "LLAMA_CLI_PATH=llama-cli" >> $GITHUB_ENV
+    
+    - name: Download LLM model with huggingface-cli
+      run: |
+        mkdir -p models
+        
+        # 日本語対応の軽量モデルをダウンロード
+        huggingface-cli download \
+          mmnga/ELYZA-japanese-Llama-2-7b-fast-instruct-gguf \
+          ELYZA-japanese-Llama-2-7b-fast-instruct-q4_0.gguf \
+          --local-dir models \
+          --local-dir-use-symlinks False
+        
+        # モデルファイル名を統一
+        mv models/ELYZA-japanese-Llama-2-7b-fast-instruct-q4_0.gguf models/ggml-model-Q4_K_M.gguf
+        
+        echo "LLAMA_MODEL_PATH=$(pwd)/models/ggml-model-Q4_K_M.gguf" >> $GITHUB_ENV
+        echo "LLAMA_CLI_PATH=/usr/local/bin/llama-cli" >> $GITHUB_ENV
+    
+    - name: Create cache directories
+      run: |
+        mkdir -p ~/.cache/sudachi
+        mkdir -p /tmp
+    
+    - name: Verify environment
+      run: |
+        python --version
+        java -version
+        llama-cli --help | head -5
+        echo "SUPABASE_URL: ${SUPABASE_URL:0:20}..."
+        echo "Model path: $LLAMA_MODEL_PATH"
+        echo "CLI path: $LLAMA_CLI_PATH"
+        ls -la models/
+        file models/ggml-model-Q4_K_M.gguf
+    
+    - name: Initialize Supabase dictionary
+      run: |
+        python3 << 'EOF'
+        import os
+        from supabase import create_client
+        
+        # 基本辞書データを投入（初回のみ）
+        client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
+        
+        # 既存辞書単語の例（実際にはもっと大量に投入）
+        basic_words = [
+            {'word': '医療', 'reading': 'イリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '厚生労働省', 'reading': 'コウセイロウドウショウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '健康', 'reading': 'ケンコウ', 'part_of_speech': '名詞', 'source': 'basic'},
+        ]
+        
+        try:
+            # 既存チェック
+            existing = client.table('dictionary_words').select('word').limit(1).execute()
+            if not existing.data:
+                client.table('dictionary_words').insert(basic_words).execute()
+                print("基本辞書を初期化しました")
+            else:
+                print("辞書は既に初期化済みです")
+        except Exception as e:
+            print(f"辞書初期化エラー: {e}")
+        EOF
+    
+    - name: Run crawler analysis
+      env:
+        MAX_WORKERS: ${{ github.event.inputs.max_workers || '3' }}
+      run: |
+        python3 << 'EOF'
+        import sys
+        import os
+        sys.path.append('.')
+        
+        # メインクローラー実行
+        try:
+            from main_crawler import MhlwCrawler
+            crawler = MhlwCrawler()
+            max_workers = int(os.environ.get('MAX_WORKERS', '3'))
+            crawler.run(max_workers=max_workers)
+            print("✅ クローラー実行完了")
+        except Exception as e:
+            print(f"❌ エラー: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        EOF
+    
+    - name: Generate summary report
+      if: always()
+      run: |
+        python3 << 'EOF'
+        import os
+        from supabase import create_client
+        from datetime import datetime, timedelta
+        
+        client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
+        
+        # 今日の結果サマリー
+        today = datetime.now().date()
+        
+        # 新語候補数
+        new_words = client.table('new_word_candidates')\
+            .select('*')\
+            .gte('created_at', today.isoformat())\
+            .execute()
+        
+        # 処理URL数
+        processed = client.table('processed_urls')\
+            .select('*')\
+            .gte('created_at', today.isoformat())\
+            .execute()
+        
+        print(f"""
+        📊 実行結果サマリー
+        ==================
+        日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        処理済URL: {len(processed.data)}件
+        新語候補: {len(new_words.data)}件
+        
+        🔍 新語候補トップ5:
+        """)
+        
+        for i, word in enumerate(new_words.data[:5], 1):
+            print(f"{i}. {word['word']} ({word['reading']}) - 信頼度: {word['confidence_score']:.2f}")
+        
+        print("\n✅ 解析完了")
+        EOF
+    
+    - name: Cleanup temporary files
+      if: always()
+      run: |
+        rm -rf /tmp/*.pdf /tmp/*.docx /tmp/*.pptx
+        rm -rf models/  # 大きいので削除（次回再ダウンロード）
+    
+    - name: Upload logs (on failure)
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: crawler-logs
+        path: |
+          *.log
+          /tmp/crawler_*.txt
+        retention-days: 7
