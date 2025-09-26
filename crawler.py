@@ -20,9 +20,9 @@ from sudachipy import dictionary
 START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
 # 0 を設定すると、処理URL数の上限なし
-MAX_URLS_TO_CRAWL = 0
+MAX_URLS_TO_CRAWL = 200
 MAX_WORKERS = 8
-RECRAWL_DAYS = 0
+RECRAWL_DAYS = 30
 REQUEST_TIMEOUT = 15
 
 # --- Sudachiの初期化 ---
@@ -54,12 +54,16 @@ def get_text(content: bytes, content_type: str) -> str:
                 with pdfplumber.open(pdf_file) as pdf:
                     all_text = []
                     for page in pdf.pages:
-                        extracted = page.extract_text()
-                        if extracted:
-                            all_text.append(extracted)
+                        try:
+                            extracted = page.extract_text()
+                            if extracted:
+                                all_text.append(extracted)
+                        except Exception as page_e:
+                            print(f"  [!] PDFの特定ページで解析エラー: {page_e}")
                     text = "\n".join(all_text)
         except Exception as e:
-            print(f"  [!] PDF解析エラー (pdfplumber): {e}")
+            print(f"  [!] PDF解析中に致命的なエラーが発生。このファイルをスキップします: {e}")
+            return ""
     elif "vnd.openxmlformats-officedocument.wordprocessingml.document" in content_type:  # docx
         try:
             doc = docx.Document(io.BytesIO(content))
@@ -235,7 +239,6 @@ def main():
                 except Exception as e:
                     print(f"[!] future.result()でエラー: {url} - {e}")
                 
-                # 内側のループを抜けた後、外側のループも抜ける必要があるため再度チェック
                 if MAX_URLS_TO_CRAWL > 0 and processed_count >= MAX_URLS_TO_CRAWL:
                     break
 
