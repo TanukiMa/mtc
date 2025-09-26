@@ -20,9 +20,9 @@ from sudachipy import dictionary
 START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
 # 0 を設定すると、処理URL数の上限なし
-MAX_URLS_TO_CRAWL = 200
-MAX_WORKERS = 8
-RECRAWL_DAYS = 30
+MAX_URLS_TO_CRAWL = 0
+MAX_WORKERS = 32
+RECRAWL_DAYS = 0
 REQUEST_TIMEOUT = 15
 
 # --- Sudachiの初期化 ---
