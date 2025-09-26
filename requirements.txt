@@ -1,0 +1,9 @@
+huggingface_hub
+lxml
+beautifulsoup4
+docx
+PyPDF2
+python_pptx
+Requests
+sudachipy
+supabase
