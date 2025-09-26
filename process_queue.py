@@ -1,6 +1,8 @@
 # process_queue.py
 import re
 import os
+import time
+import configparser
 import requests
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
@@ -9,16 +11,12 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from sudachipy import tokenizer, dictionary
 
-# --- 設定項目 ---
-MAX_WORKERS = 4
-PROCESS_BATCH_SIZE = 50
-REQUEST_TIMEOUT = 15
-
 # --- Sudachi Tokenizerのためのグローバル変数 ---
 _WORKER_TOKENIZER = None
 
 # --- テキスト抽出・解析関連の関数群 ---
 def clean_text(text: str) -> str:
+    """テキストから不要な改行やスペースを削除・整形する"""
     if not text: return ""
     return re.sub(r'\s+', ' ', text).strip()
 
@@ -33,6 +31,7 @@ def get_text_from_html(content: bytes) -> str:
         raise RuntimeError(f"HTML解析エラー: {e}")
 
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
+    """sudachipyを使い、未知の普通名詞を抽出する"""
     if not text.strip() or not tokenizer_obj: return []
     chunk_size = 40000
     words = []
@@ -46,10 +45,11 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
     return words
 
 # --- 各ワーカープロセスで実行される本体 ---
-def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set):
+def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int):
     """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
+        # このワーカープロセスでTokenizerが未作成の場合、一度だけ作成する
         _WORKER_TOKENIZER = dictionary.Dictionary(dict_type="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
 
     url = queue_item['url']
@@ -58,10 +58,9 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
+        response = requests.get(url, timeout=request_timeout, headers=headers)
         response.raise_for_status()
 
-        # Content-TypeがHTMLでなければ処理を完了とする
         content_type = response.headers.get("content-type", "").lower()
         if "html" not in content_type:
             print(f"  [-] HTMLでないためスキップ: {content_type}")
@@ -102,34 +101,60 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
 # --- メイン処理 (キューの管理とワーカーへのディスパッチ) ---
 def main():
     """キューからURLを取得し、プロセスプールに処理を依頼する"""
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    
+    max_workers = config.getint('Processor', 'MAX_WORKERS')
+    process_batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
+    request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
+    polling_duration_minutes = config.getint('Polling', 'POLLING_DURATION_MINUTES')
+    polling_interval_seconds = config.getint('Polling', 'POLLING_INTERVAL_SECONDS')
+
     supabase_url: str = os.environ.get("SUPABASE_URL")
     supabase_key: str = os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
 
     supabase_main: Client = create_client(supabase_url, supabase_key)
-    print("--- コンテンツ解析処理開始 ---")
+    print("--- コンテンツ解析処理開始 (ポーリングモード) ---")
 
     response = supabase_main.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
     print(f"[*] {len(stop_words_set)}件の除外ワードを読み込みました。")
 
-    response = supabase_main.table("crawl_queue").select("id, url", count='exact').eq("status", "queued").limit(PROCESS_BATCH_SIZE).execute()
-    urls_to_process = response.data
-    if not urls_to_process:
-        print("[*] 処理対象のURLがキューにありません。終了します。")
-        return
+    start_time = time.time()
+    end_time = start_time + polling_duration_minutes * 60
+    total_processed_count = 0
 
-    processing_ids = [item['id'] for item in urls_to_process]
-    supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
-    print(f"[*] {len(urls_to_process)}件のURLを処理対象としてロックしました。")
+    # 指定された時間が経過するまでループ
+    while time.time() < end_time:
+        response = supabase_main.table("crawl_queue").select("id, url").eq("status", "queued").limit(process_batch_size).execute()
+        urls_to_process = response.data
+        
+        if not urls_to_process:
+            remaining_time = round(end_time - time.time())
+            if remaining_time <= 0:
+                print("[*] 待機時間が終了しました。")
+                break
+            
+            print(f"[*] 処理対象のURLがありません。{polling_interval_seconds}秒待機します... (残り約{remaining_time}秒)")
+            time.sleep(polling_interval_seconds)
+            continue
 
-    with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set) for item in urls_to_process]
-        results = [f.result() for f in futures]
+        processing_ids = [item['id'] for item in urls_to_process]
+        supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
+        print(f"[*] {len(urls_to_process)}件のURLを処理対象としてロックしました。")
+
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set, request_timeout) for item in urls_to_process]
+            results = [f.result() for f in futures]
+        
+        success_count = sum(1 for r in results if r)
+        batch_count = len(results)
+        total_processed_count += batch_count
+        print(f"  [+] 1バッチ処理完了 (成功: {success_count}, 失敗: {batch_count - success_count})")
     
-    success_count = sum(1 for r in results if r)
     print(f"\n--- コンテンツ解析処理終了 ---")
-    print(f"今回処理したURL数: {len(results)} (成功: {success_count}, 失敗: {len(results) - success_count})")
+    print(f"今回処理した合計URL数: {total_processed_count}")
 
 if __name__ == "__main__":
     main()
