@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-厚労省サイト専門用語新語発見システム
-GitHub Actions + Supabase + Sudachi + llama.cpp
+厚労省サイト専門用語新語発見システム（辞書ベース判定）
+GitHub Actions + Supabase + SudachiDict-full
 """
 
 import os
 import re
 import hashlib
 import logging
-import asyncio
-import subprocess
-import json
-import tempfile
 from pathlib import Path
-from typing import List, Set, Dict, Optional, Tuple
+from typing import List, Set, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 import uuid
@@ -167,7 +163,7 @@ class SudachiAnalyzer:
             # 設定ファイルがあれば使用、なければデフォルト
             self.tokenizer_obj = dictionary.Dictionary().create()
             self.mode = tokenizer.Tokenizer.SplitMode.A
-            logger.info("✅ Sudachi辞書を使用して初期化完了")
+            logger.info("✅ SudachiDict-full を使用して初期化完了")
         except Exception as e:
             logger.error(f"Sudachi辞書の初期化に失敗: {e}")
             raise
@@ -190,7 +186,7 @@ class SudachiAnalyzer:
                 if (pos in ['名詞', '動詞', '形容詞'] and 
                     len(surface) >= 2 and 
                     not surface.isdigit() and
-                    surface not in ['こと', 'もの', 'ため']):
+                    surface not in ['こと', 'もの', 'ため', 'など']):
                     
                     words.append({
                         'word': surface,
@@ -201,91 +197,81 @@ class SudachiAnalyzer:
             logger.error(f"形態素解析エラー: {e}")
         
         return words
+    
+    def is_known_word(self, word: str) -> bool:
+        """SudachiDict-fullに収載されているかチェック"""
+        try:
+            # 辞書に登録されている語彙かどうかを判定
+            tokens = self.tokenizer_obj.tokenize(word, self.mode)
+            
+            # 1つのトークンになり、かつ未知語でない場合は既知語
+            if len(tokens) == 1:
+                token = tokens[0]
+                # 未知語の場合、品詞に「補助記号」等が含まれることが多い
+                pos_features = token.part_of_speech()
+                if ('未知語' not in str(pos_features) and 
+                    '補助記号' not in str(pos_features) and
+                    token.surface() == word):
+                    return True
+            
+            return False
+        except Exception as e:
+            logger.warning(f"辞書検索エラー '{word}': {e}")
+            return False
 
 class NewWordDetector:
-    """新語検出（llama-cli使用）"""
+    """辞書ベース新語検出"""
     
-    def __init__(self, model_path: str, cli_path: str = "llama-cli"):
-        self.model_path = model_path
-        self.cli_path = cli_path
+    def __init__(self, analyzer: SudachiAnalyzer):
+        self.analyzer = analyzer
         
-        # llama-cliの動作確認
-        try:
-            result = subprocess.run([self.cli_path, "--help"], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                raise RuntimeError(f"llama-cli not found or not working: {self.cli_path}")
-            logger.info("✅ llama-cli is ready")
-        except Exception as e:
-            logger.error(f"llama-cli initialization failed: {e}")
-            raise
+        # 除外する一般的な語彙（厚労省文書でよく出現する基本語彙）
+        self.common_words = {
+            # 一般的な行政・医療用語
+            '政策', '制度', '対策', '施策', '事業', '取り組み', '推進', '支援',
+            '国民', '社会', '地域', '全国', '都道府県', '市町村',
+            '厚生', '労働', '健康', '医療', '介護', '福祉', '年金', '保険',
+            '災害', '職場', '労働者', '事業者', '関係者',
+            # 基本語彙
+            '今回', '今後', '現在', '過去', '将来', '状況', '課題', '問題',
+            '方法', '手法', '仕組み', '体制', '環境', '条件', '基準',
+            '効果', '影響', '結果', '成果', '実績', '評価'
+        }
+        
+        logger.info("✅ 辞書ベース新語検出器を初期化完了")
     
-    def is_new_word(self, word: str, context: str = "") -> Tuple[bool, float, str]:
-        """新語かどうか判定"""
-        prompt = f"""以下の単語が医療・厚生労働関連の新しい専門用語か判定してください。
-
-単語: {word}
-文脈: {context[:200]}
-
-判定基準:
-- 既存の一般的な単語ではない
-- 専門的な概念を表している  
-- 比較的新しい用語である可能性
-
-回答は以下の形式で答えてください:
-判定: [新語/既存語]
-信頼度: [0.0-1.0]
-理由: [判定理由を簡潔に]"""
-
-        try:
-            # 一時ファイルでプロンプトを渡す
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                f.write(prompt)
-                prompt_file = f.name
+    def is_new_word(self, word: str, part_of_speech: str) -> tuple[bool, float, str]:
+        """辞書ベースで新語かどうか判定"""
+        
+        # 基本的なフィルタリング
+        if (len(word) < 3 or  # 3文字未満は除外
+            word in self.common_words or  # 一般語は除外
+            word.isdigit() or  # 数字のみは除外
+            not re.match(r'^[ぁ-んァ-ヶー一-龠a-zA-Z]+, word)):  # 文字種チェック
+            return False, 0.1, "基本フィルタで除外"
+        
+        # 名詞に限定（新語候補として最も有力）
+        if part_of_speech != '名詞':
+            return False, 0.2, "名詞以外"
+        
+        # SudachiDict-fullに収載されているかチェック
+        is_known = self.analyzer.is_known_word(word)
+        
+        if is_known:
+            return False, 0.3, "SudachiDict-fullに収載済み"
+        else:
+            # 新語候補として判定
+            confidence = 0.8  # 辞書にない場合は高い信頼度
             
-            # llama-cli実行
-            cmd = [
-                self.cli_path,
-                "-m", self.model_path,
-                "-f", prompt_file,
-                "-n", "200",            # max tokens
-                "--temp", "0.1",        # temperature
-                "--top-k", "40",        # top-k sampling
-                "--top-p", "0.9",       # top-p sampling
-                "-c", "2048",           # context size
-                "--threads", "4"        # threads
-            ]
+            # 専門用語らしさによる信頼度調整
+            if len(word) >= 5:  # 5文字以上は専門用語の可能性高
+                confidence = 0.9
+            elif any(char in word for char in ['DX', 'AI', 'IoT', 'ICT']):  # 英略語含む
+                confidence = 0.9
+            elif word.endswith(('システム', '事業', '制度', '政策')):  # 専門用語パターン
+                confidence = 0.7
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            # 一時ファイル削除
-            os.unlink(prompt_file)
-            
-            if result.returncode != 0:
-                logger.error(f"llama-cli error: {result.stderr}")
-                return False, 0.0, "LLM実行エラー"
-            
-            response = result.stdout.strip()
-            
-            # レスポンス解析（簡略版）
-            is_new = "新語" in response
-            
-            # 信頼度抽出（正規表現で）
-            confidence_match = re.search(r'信頼度[:：]\s*([0-9.]+)', response)
-            confidence = float(confidence_match.group(1)) if confidence_match else (0.8 if is_new else 0.2)
-            
-            # 理由抽出
-            reason_match = re.search(r'理由[:：]\s*(.+)', response, re.MULTILINE | re.DOTALL)
-            reasoning = reason_match.group(1).strip() if reason_match else response
-            
-            return is_new, confidence, reasoning
-            
-        except subprocess.TimeoutExpired:
-            logger.error(f"llama-cli timeout for word: {word}")
-            return False, 0.0, "LLM実行タイムアウト"
-        except Exception as e:
-            logger.error(f"llama-cli execution error: {e}")
-            return False, 0.0, f"LLM実行エラー: {e}"
+            return True, confidence, f"SudachiDict-full未収載（{len(word)}文字の名詞）"
 
 class MhlwCrawler:
     """メインクローラークラス"""
@@ -294,11 +280,7 @@ class MhlwCrawler:
         self.db = SupabaseClient()
         self.processor = DocumentProcessor()
         self.analyzer = SudachiAnalyzer()
-        
-        # LLM設定
-        model_path = os.environ.get('LLAMA_MODEL_PATH', 'models/ggml-model-Q4_K_M.gguf')
-        cli_path = os.environ.get('LLAMA_CLI_PATH', 'llama-cli')
-        self.detector = NewWordDetector(model_path, cli_path)
+        self.detector = NewWordDetector(self.analyzer)  # LLMではなく辞書ベース
         
         self.base_url = "https://www.mhlw.go.jp"
         self.session = requests.Session()
@@ -306,7 +288,7 @@ class MhlwCrawler:
             'User-Agent': 'Mozilla/5.0 (compatible; MHLW Terminology Research Bot; +https://github.com/)'
         })
         
-        logger.info("🚀 MhlwCrawler初期化完了")
+        logger.info("🚀 MhlwCrawler初期化完了（辞書ベース新語検出）")
     
     def get_urls_to_crawl(self) -> List[str]:
         """クローリング対象URL取得"""
@@ -392,26 +374,45 @@ class MhlwCrawler:
             words = self.analyzer.analyze(text)
             logger.info(f"🔤 形態素解析完了: {len(words)}語を抽出")
             
-            # 既存辞書と照合
+            # 既存辞書と照合 + 新語検出
             dictionary_words = self.db.get_dictionary_words()
             new_candidates = []
             
+            # 語彙の頻度カウント（同じ文書内での出現頻度）
+            word_freq = {}
             for word_data in words:
                 word = word_data['word']
-                if word not in dictionary_words and len(word) >= 2:
-                    # LLM判定（サンプルのみ）
-                    if len(new_candidates) < 5:  # 最初の5語のみLLM判定
-                        is_new, confidence, reasoning = self.detector.is_new_word(word, text[:500])
-                        if is_new and confidence > 0.5:
-                            new_candidates.append({
-                                'word': word,
-                                'reading': word_data['reading'],
-                                'part_of_speech': word_data['part_of_speech'],
-                                'confidence_score': confidence,
-                                'llm_reasoning': reasoning[:200],  # 理由は200文字以内
-                                'source_urls': [url],
-                                'frequency_count': 1
-                            })
+                word_freq[word] = word_freq.get(word, 0) + 1
+            
+            # ユニークな語彙のみを新語候補として検討
+            unique_words = {}
+            for word_data in words:
+                word = word_data['word']
+                if word not in unique_words:
+                    unique_words[word] = word_data
+            
+            logger.info(f"🔍 新語検出開始: {len(unique_words)}語をチェック")
+            
+            for word, word_data in unique_words.items():
+                # 基本辞書にない語彙をチェック
+                if word not in dictionary_words:
+                    # 辞書ベース新語判定
+                    is_new, confidence, reasoning = self.detector.is_new_word(
+                        word, word_data['part_of_speech']
+                    )
+                    
+                    if is_new and confidence > 0.6:
+                        frequency = word_freq.get(word, 1)
+                        new_candidates.append({
+                            'word': word,
+                            'reading': word_data['reading'],
+                            'part_of_speech': word_data['part_of_speech'],
+                            'confidence_score': confidence,
+                            'llm_reasoning': reasoning,  # 判定理由
+                            'source_urls': [url],
+                            'frequency_count': frequency
+                        })
+                        logger.info(f"✨ 新語候補発見: '{word}' (信頼度: {confidence:.3f}, 頻度: {frequency})")
             
             # DB保存
             url_id = self.db.save_processed_url(url, content_type, content_hash)
@@ -468,9 +469,9 @@ class MhlwCrawler:
         
         return ""
     
-    def run(self, max_workers: int = 5):
+    def run(self, max_workers: int = 3):
         """メイン実行"""
-        logger.info("🚀 厚労省サイト解析開始")
+        logger.info("🚀 厚労省サイト解析開始（辞書ベース新語検出）")
         start_time = time.time()
         
         # クローリング対象URL取得
@@ -502,12 +503,13 @@ class MhlwCrawler:
         
         elapsed_time = time.time() - start_time
         logger.info(f"🎉 処理完了: {total_processed}URL処理, {total_new_words}新語候補発見, {elapsed_time:.1f}秒")
+        logger.info("💡 新語判定基準: SudachiDict-full（170万語）未収載の名詞")
 
 if __name__ == "__main__":
     # 直接実行用
     import argparse
     
-    parser = argparse.ArgumentParser(description='厚労省サイト専門用語解析')
+    parser = argparse.ArgumentParser(description='厚労省サイト専門用語解析（辞書ベース）')
     parser.add_argument('--workers', type=int, default=3, help='並列処理数')
     args = parser.parse_args()
     
