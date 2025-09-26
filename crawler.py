@@ -20,7 +20,7 @@ START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
 MAX_URLS_TO_CRAWL = 100000000
 MAX_WORKERS = 8
-RECRAWL_DAYS = 30
+RECRAWL_DAYS = 0
 REQUEST_TIMEOUT = 15
 
 # --- Sudachiの初期化 ---
