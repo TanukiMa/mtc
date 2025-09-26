@@ -1,48 +1,36 @@
 # process_queue.py
 import re
 import os
-import io
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 
 from bs4 import BeautifulSoup
-import pdfplumber
-import docx
-from pptx import Presentation
 from supabase import create_client, Client
 from sudachipy import tokenizer, dictionary
 
 # --- 設定項目 ---
-MAX_WORKERS = 4  # プロセス数 (CPUコア数に合わせるのが一般的)
-# 1回の実行でキューから取得し、処理するURLの数
+MAX_WORKERS = 4
 PROCESS_BATCH_SIZE = 50
 REQUEST_TIMEOUT = 15
 
 # --- Sudachi Tokenizerのためのグローバル変数 ---
 _WORKER_TOKENIZER = None
 
-# --- テキスト抽出・解析関連の関数群 (内容はcrawler.pyから流用) ---
+# --- テキスト抽出・解析関連の関数群 ---
 def clean_text(text: str) -> str:
     if not text: return ""
     return re.sub(r'\s+', ' ', text).strip()
 
-def get_text(content: bytes, content_type: str) -> str:
-    text = ""
-    if "html" in content_type:
+def get_text_from_html(content: bytes) -> str:
+    """HTMLコンテンツからテキストのみを抽出する"""
+    try:
         soup = BeautifulSoup(content, 'html.parser')
         for s in soup(['script', 'style']): s.decompose()
         text = ' '.join(soup.stripped_strings)
-    elif "pdf" in content_type:
-        try:
-            with io.BytesIO(content) as pdf_file:
-                with pdfplumber.open(pdf_file) as pdf:
-                    all_text = [p.extract_text() for p in pdf.pages if p.extract_text()]
-                    text = "\n".join(all_text)
-        except Exception as e:
-            raise RuntimeError(f"PDF解析エラー: {e}")
-    # ... docx, pptxの処理も同様 ...
-    return clean_text(text)
+        return clean_text(text)
+    except Exception as e:
+        raise RuntimeError(f"HTML解析エラー: {e}")
 
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
     if not text.strip() or not tokenizer_obj: return []
@@ -59,7 +47,7 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
 
 # --- 各ワーカープロセスで実行される本体 ---
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set):
-    """単一のURLをダウンロード・解析・保存するワーカー関数"""
+    """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict_type="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
@@ -73,8 +61,16 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
         response = requests.get(url, timeout=REQUEST_TIMEOUT, headers=headers)
         response.raise_for_status()
 
+        # Content-TypeがHTMLでなければ処理を完了とする
         content_type = response.headers.get("content-type", "").lower()
-        text = get_text(response.content, content_type)
+        if "html" not in content_type:
+            print(f"  [-] HTMLでないためスキップ: {content_type}")
+            supabase.table("crawl_queue").update({
+                "status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", queue_item['id']).execute()
+            return True
+
+        text = get_text_from_html(response.content)
         
         if text:
             new_words = analyze_with_sudachi(text, _WORKER_TOKENIZER)
@@ -91,7 +87,6 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
                             "word_id": word_id, "source_url": url
                         }).execute()
 
-        # 成功: ステータスを 'completed' に更新
         supabase.table("crawl_queue").update({
             "status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", queue_item['id']).execute()
@@ -99,7 +94,6 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
 
     except Exception as e:
         print(f"  [!] エラー発生: {url} - {e}")
-        # 失敗: ステータスを 'failed' に更新し、エラーメッセージを記録
         supabase.table("crawl_queue").update({
             "status": "failed", "processed_at": datetime.now(timezone.utc).isoformat(), "error_message": str(e)
         }).eq("id", queue_item['id']).execute()
@@ -115,24 +109,20 @@ def main():
     supabase_main: Client = create_client(supabase_url, supabase_key)
     print("--- コンテンツ解析処理開始 ---")
 
-    # stop_wordsを最初に読み込む
     response = supabase_main.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
     print(f"[*] {len(stop_words_set)}件の除外ワードを読み込みました。")
 
-    # 1. キューから処理対象のURLを取得
-    response = supabase_main.table("crawl_queue").select("id, url").eq("status", "queued").limit(PROCESS_BATCH_SIZE).execute()
+    response = supabase_main.table("crawl_queue").select("id, url", count='exact').eq("status", "queued").limit(PROCESS_BATCH_SIZE).execute()
     urls_to_process = response.data
     if not urls_to_process:
         print("[*] 処理対象のURLがキューにありません。終了します。")
         return
 
-    # 2. 取得したURLのステータスを 'processing' に一括更新 (他の実行と重複しないように)
     processing_ids = [item['id'] for item in urls_to_process]
     supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
     print(f"[*] {len(urls_to_process)}件のURLを処理対象としてロックしました。")
 
-    # 3. プロセスプールで並列処理
     with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set) for item in urls_to_process]
         results = [f.result() for f in futures]
