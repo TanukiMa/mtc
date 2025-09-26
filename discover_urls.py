@@ -1,6 +1,6 @@
 # discover_urls.py
 import os
-import sys # sysモジュールをインポート
+import sys
 import requests
 import hashlib
 from urllib.parse import urljoin, urlparse
@@ -27,15 +27,11 @@ def main():
     supabase: Client = create_client(supabase_url, supabase_key)
     print("--- URL差分検知・発見処理開始 ---")
 
-    # ▼▼▼▼▼ ここからが修正箇所 ▼▼▼▼▼
-    # スクリプト開始時にDB接続をテストする
+    # DB接続テスト (変更なし)
     print("[*] Supabaseへの接続をテストしています...")
     try:
-        # stop_wordsテーブルの件数を数えるなど、軽い読み取り処理を試す
         test_res = supabase.table("stop_words").select("id", count='exact').limit(0).execute()
-        # test_res自体がNoneになるケースも考慮
         if test_res is None or not hasattr(test_res, 'count'):
-             # hasattrでcount属性の存在を確認
             raise ConnectionError("DBからの応答が不正です。")
         print(f"  [+] 接続成功。 (Stop Words: {test_res.count}件)")
     except Exception as e:
@@ -43,8 +39,7 @@ def main():
         print("      - GitHub Secrets (SUPABASE_URL, SUPABASE_KEY) の値が正しいか確認してください。", file=sys.stderr)
         print("      - Supabaseプロジェクトが一時停止(Paused)していないか確認してください。", file=sys.stderr)
         print(f"      - 詳細エラー: {e}", file=sys.stderr)
-        sys.exit(1) # 接続に失敗したら、エラーで処理を終了する
-    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+        sys.exit(1)
 
     urls_to_visit = {START_URL}
     visited_urls = set()
@@ -64,24 +59,33 @@ def main():
             
             new_hash = get_content_hash(response.content)
 
-            db_res = supabase.table("crawl_queue").select("content_hash").eq("url", url).maybe_single().execute()
-            
-            if db_res is None:
-                print(f"  [!] DBからの応答がありませんでした。このURLをスキップします。")
+            # ▼▼▼▼▼ ここからが修正箇所 ▼▼▼▼▼
+            # .maybe_single() を使わず、通常のselectで存在確認を行う
+            db_res = supabase.table("crawl_queue").select("content_hash").eq("url", url).execute()
+
+            # DB応答が不正な場合のみスキップ
+            if not hasattr(db_res, 'data'):
+                print(f"  [!] DBからの応答が不正でした。このURLをスキップします。")
                 continue
 
-            if db_res.data is None:
+            # db_res.data が空のリストの場合 -> 新規URL
+            if not db_res.data:
                 print(f"  [+] 新規URL発見。キューに追加します。")
                 supabase.table("crawl_queue").insert({
-                    "url": url, "status": "queued", "content_hash": new_hash
+                    "url": url,
+                    "status": "queued",
+                    "content_hash": new_hash
                 }).execute()
+            # db_res.data に要素がある場合 -> 既存URL
             else:
-                old_hash = db_res.data.get("content_hash")
+                old_hash = db_res.data[0].get("content_hash")
                 if old_hash != new_hash:
                     print(f"  [+] コンテンツ更新を検知。キューに再追加します。")
                     supabase.table("crawl_queue").update({
-                        "status": "queued", "content_hash": new_hash
+                        "status": "queued",
+                        "content_hash": new_hash
                     }).eq("url", url).execute()
+            # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
             content_type = response.headers.get("content-type", "").lower()
             if "html" in content_type:
@@ -90,6 +94,7 @@ def main():
                     link = urljoin(url, a_tag['href']).split('#')[0]
                     if urlparse(link).netloc == TARGET_DOMAIN and link not in visited_urls:
                         urls_to_visit.add(link)
+
         except requests.RequestException as e:
             print(f"  [!] HTTPエラー: {url} - {e}")
         except Exception as e:
