@@ -2,7 +2,6 @@
 import os
 import sys
 import requests
-import hashlib
 import configparser
 import threading
 from urllib.parse import urljoin, urlparse
@@ -15,40 +14,25 @@ urls_to_visit = set()
 visited_urls = set()
 lock = threading.Lock()
 
-def get_content_hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
 def worker_discover_url(url: str, supabase_client, config):
-    """単一URLを検証し、リンクを抽出し、キューに追加するワーカー"""
+    """単一URLからリンクを抽出し、発見したURLをキューと次の訪問先に追加する"""
     global urls_to_visit, visited_urls
     
     target_domain = config.get('General', 'TARGET_DOMAIN')
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     
     try:
-        print(f"[*] 検証中: {url}")
+        # print(f"[*] 探索中: {url}")
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=request_timeout, headers=headers, allow_redirects=True)
         response.raise_for_status()
         
+        # 自身のURLをまずキューに追加（存在すれば無視される）
+        supabase_client.table("crawl_queue").upsert({"url": url}, on_conflict="url").execute()
+
+        # HTMLページからのみリンクを探索
         content_type = response.headers.get("content-type", "").lower()
-
         if "html" in content_type:
-            new_hash = get_content_hash(response.content)
-
-            db_res = supabase_client.table("crawl_queue").select("content_hash").eq("url", url).execute()
-            if not hasattr(db_res, 'data'):
-                print(f"  [!] DB応答不正: {url}")
-                return
-
-            if not db_res.data:
-                print(f"  [+] 新規発見 -> キュー追加: {url}")
-                supabase_client.table("crawl_queue").insert({"url": url, "status": "queued", "content_hash": new_hash}).execute()
-            else:
-                if db_res.data[0].get("content_hash") != new_hash:
-                    print(f"  [+] 更新検知 -> キュー追加: {url}")
-                    supabase_client.table("crawl_queue").update({"status": "queued", "content_hash": new_hash}).eq("url", url).execute()
-
             soup = BeautifulSoup(response.content, 'html.parser')
             new_links = set()
             for a_tag in soup.find_all('a', href=True):
@@ -59,11 +43,12 @@ def worker_discover_url(url: str, supabase_client, config):
             # 共有リソースへのアクセスをロック
             with lock:
                 urls_to_visit.update(new_links - visited_urls)
-        else:
-            print(f"  [-] HTMLでないためスキップ: {url}")
 
+    except requests.RequestException:
+        # 接続エラーなどは静かに無視して次に進む
+        pass
     except Exception as e:
-        print(f"  [!] エラー: {url} - {e}")
+        print(f"  [!] 発見処理中の不明なエラー: {url} - {e}")
 
 def main():
     global urls_to_visit, visited_urls
