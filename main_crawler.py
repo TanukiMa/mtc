@@ -9,6 +9,9 @@ import re
 import hashlib
 import logging
 import asyncio
+import subprocess
+import json
+import tempfile
 from pathlib import Path
 from typing import List, Set, Dict, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,7 +23,6 @@ from bs4 import BeautifulSoup
 import supabase
 from supabase import create_client, Client
 from sudachipy import tokenizer, dictionary
-from llama_cpp import Llama
 from docx import Document
 from pptx import Presentation
 import PyPDF2
@@ -122,10 +124,21 @@ class DocumentProcessor:
             return ""
 
 class SudachiAnalyzer:
-    """Sudachi形態素解析"""
+    """Sudachi形態素解析（SudachiDict-full使用）"""
     
     def __init__(self):
-        self.tokenizer_obj = dictionary.Dictionary().create()
+        # SudachiPyでFull辞書を明示的に使用
+        from sudachipy import tokenizer, dictionary
+        
+        try:
+            # SudachiDict-fullを優先して使用
+            self.tokenizer_obj = dictionary.Dictionary(dict_type="full").create()
+            logger.info("✅ SudachiDict-full を使用して初期化完了")
+        except Exception as e:
+            logger.warning(f"Full辞書の初期化に失敗、デフォルト辞書を使用: {e}")
+            # フォールバック: デフォルト辞書
+            self.tokenizer_obj = dictionary.Dictionary().create()
+            
         self.mode = tokenizer.Tokenizer.SplitMode.A
     
     def analyze(self, text: str) -> List[Dict]:
@@ -145,43 +158,89 @@ class SudachiAnalyzer:
         return words
 
 class NewWordDetector:
-    """新語検出（LLM使用）"""
+    """新語検出（llama-cli使用）"""
     
-    def __init__(self, model_path: str):
-        self.llm = Llama(
-            model_path=model_path,
-            n_ctx=2048,
-            n_threads=4
-        )
+    def __init__(self, model_path: str, cli_path: str = "llama-cli"):
+        self.model_path = model_path
+        self.cli_path = cli_path
+        
+        # llama-cliの動作確認
+        try:
+            result = subprocess.run([self.cli_path, "--help"], 
+                                  capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                raise RuntimeError(f"llama-cli not found or not working: {self.cli_path}")
+            logger.info("llama-cli is ready")
+        except Exception as e:
+            logger.error(f"llama-cli initialization failed: {e}")
+            raise
     
     def is_new_word(self, word: str, context: str = "") -> Tuple[bool, float, str]:
         """新語かどうか判定"""
-        prompt = f"""
-        以下の単語が医療・厚生労働関連の新しい専門用語か判定してください。
-        
-        単語: {word}
-        文脈: {context[:200]}
-        
-        判定基準:
-        - 既存の一般的な単語ではない
-        - 専門的な概念を表している
-        - 比較的新しい用語である可能性
-        
-        回答形式:
-        判定: [新語/既存語]
-        信頼度: [0.0-1.0]
-        理由: [判定理由]
-        """
-        
-        response = self.llm(prompt, max_tokens=200, temperature=0.1)
-        result = response['choices'][0]['text'].strip()
-        
-        # 簡単なパース（実際にはもっと堅牢にする）
-        is_new = "新語" in result
-        confidence = 0.8 if is_new else 0.2  # 簡略化
-        reasoning = result
-        
-        return is_new, confidence, reasoning
+        prompt = f"""以下の単語が医療・厚生労働関連の新しい専門用語か判定してください。
+
+単語: {word}
+文脈: {context[:200]}
+
+判定基準:
+- 既存の一般的な単語ではない
+- 専門的な概念を表している  
+- 比較的新しい用語である可能性
+
+回答は以下の形式で答えてください:
+判定: [新語/既存語]
+信頼度: [0.0-1.0]
+理由: [判定理由を簡潔に]"""
+
+        try:
+            # 一時ファイルでプロンプトを渡す
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write(prompt)
+                prompt_file = f.name
+            
+            # llama-cli実行
+            cmd = [
+                self.cli_path,
+                "-m", self.model_path,
+                "-f", prompt_file,
+                "-n", "200",            # max tokens
+                "--temp", "0.1",        # temperature
+                "--top-k", "40",        # top-k sampling
+                "--top-p", "0.9",       # top-p sampling
+                "-c", "2048",           # context size
+                "--threads", "4"        # threads
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            # 一時ファイル削除
+            os.unlink(prompt_file)
+            
+            if result.returncode != 0:
+                logger.error(f"llama-cli error: {result.stderr}")
+                return False, 0.0, "LLM実行エラー"
+            
+            response = result.stdout.strip()
+            
+            # レスポンス解析（簡略版）
+            is_new = "新語" in response
+            
+            # 信頼度抽出（正規表現で）
+            confidence_match = re.search(r'信頼度[:：]\s*([0-9.]+)', response)
+            confidence = float(confidence_match.group(1)) if confidence_match else (0.8 if is_new else 0.2)
+            
+            # 理由抽出
+            reason_match = re.search(r'理由[:：]\s*(.+)', response, re.MULTILINE | re.DOTALL)
+            reasoning = reason_match.group(1).strip() if reason_match else response
+            
+            return is_new, confidence, reasoning
+            
+        except subprocess.TimeoutExpired:
+            logger.error(f"llama-cli timeout for word: {word}")
+            return False, 0.0, "LLM実行タイムアウト"
+        except Exception as e:
+            logger.error(f"llama-cli execution error: {e}")
+            return False, 0.0, f"LLM実行エラー: {e}"
 
 class MhlwCrawler:
     """メインクローラークラス"""
@@ -190,7 +249,10 @@ class MhlwCrawler:
         self.db = SupabaseClient()
         self.processor = DocumentProcessor()
         self.analyzer = SudachiAnalyzer()
-        self.detector = NewWordDetector(os.environ.get('LLAMA_MODEL_PATH', 'models/model.gguf'))
+        self.detector = NewWordDetector(
+            model_path=os.environ.get('LLAMA_MODEL_PATH', 'models/ggml-model-Q4_K_M.gguf'),
+            cli_path=os.environ.get('LLAMA_CLI_PATH', 'llama-cli')
+        )
         self.base_url = "https://www.mhlw.go.jp"
         self.session = requests.Session()
         self.session.headers.update({
