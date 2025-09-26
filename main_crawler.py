@@ -127,17 +127,16 @@ class SudachiAnalyzer:
     """Sudachi形態素解析（SudachiDict-full使用）"""
     
     def __init__(self):
-        # SudachiPyでFull辞書を明示的に使用
+        # SudachiPyでFull辞書を使用（設定ファイル経由）
         from sudachipy import tokenizer, dictionary
         
         try:
-            # SudachiDict-fullを優先して使用
-            self.tokenizer_obj = dictionary.Dictionary(dict_type="full").create()
-            logger.info("✅ SudachiDict-full を使用して初期化完了")
-        except Exception as e:
-            logger.warning(f"Full辞書の初期化に失敗、デフォルト辞書を使用: {e}")
-            # フォールバック: デフォルト辞書
+            # 設定ファイルがあれば使用、なければデフォルト
             self.tokenizer_obj = dictionary.Dictionary().create()
+            logger.info("✅ Sudachi辞書を使用して初期化完了")
+        except Exception as e:
+            logger.error(f"Sudachi辞書の初期化に失敗: {e}")
+            raise
             
         self.mode = tokenizer.Tokenizer.SplitMode.A
     
