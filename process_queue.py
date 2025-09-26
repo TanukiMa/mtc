@@ -1,7 +1,6 @@
 # process_queue.py
 import re
 import os
-import time
 import configparser
 import requests
 from datetime import datetime, timezone
@@ -49,8 +48,7 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
     """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
-        # このワーカープロセスでTokenizerが未作成の場合、一度だけ作成する
-        _WORKER_TOKENIZER = dictionary.Dictionary(dict_type="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
+        _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
 
     url = queue_item['url']
     print(f"[*] ワーカー (PID: {os.getpid()}) が処理開始: {url}")
@@ -107,38 +105,27 @@ def main():
     max_workers = config.getint('Processor', 'MAX_WORKERS')
     process_batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
-    polling_duration_minutes = config.getint('Polling', 'POLLING_DURATION_MINUTES')
-    polling_interval_seconds = config.getint('Polling', 'POLLING_INTERVAL_SECONDS')
 
-    supabase_url: str = os.environ.get("SUPABASE_URL")
-    supabase_key: str = os.environ.get("SUPABASE_KEY")
+    supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
 
-    supabase_main: Client = create_client(supabase_url, supabase_key)
-    print("--- コンテンツ解析処理開始 (ポーリングモード) ---")
+    supabase_main = create_client(supabase_url, supabase_key)
+    print("--- コンテンツ解析処理開始 ---")
 
     response = supabase_main.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
     print(f"[*] {len(stop_words_set)}件の除外ワードを読み込みました。")
 
-    start_time = time.time()
-    end_time = start_time + polling_duration_minutes * 60
     total_processed_count = 0
-
-    # 指定された時間が経過するまでループ
-    while time.time() < end_time:
+    
+    # キューが空になるまでバッチ処理を繰り返す
+    while True:
         response = supabase_main.table("crawl_queue").select("id, url").eq("status", "queued").limit(process_batch_size).execute()
         urls_to_process = response.data
         
         if not urls_to_process:
-            remaining_time = round(end_time - time.time())
-            if remaining_time <= 0:
-                print("[*] 待機時間が終了しました。")
-                break
-            
-            print(f"[*] 処理対象のURLがありません。{polling_interval_seconds}秒待機します... (残り約{remaining_time}秒)")
-            time.sleep(polling_interval_seconds)
-            continue
+            print("[*] 処理対象のURLがキューにありません。終了します。")
+            break
 
         processing_ids = [item['id'] for item in urls_to_process]
         supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()

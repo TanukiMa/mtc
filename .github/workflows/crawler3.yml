@@ -1,9 +1,9 @@
 # .github/workflows/crawler.yml
-name: New Word Crawler Pipeline (Parallel, Change-Detection)
+name: New Word Crawler Pipeline (Sequential)
 
 on:
   schedule:
-    - cron: '0 18 * * *' # 毎日午前3時 (JST)
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 jobs:
@@ -16,16 +16,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies for discoverer
-        run: |
-          pip install requests beautifulsoup4 supabase
-      - name: Run URL Discoverer and Change Detector
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 supabase
+      - name: Run URL Discoverer (Parallel)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python discover_urls.py
 
   process:
+    # discoverジョブの完了を待ってから開始
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -37,7 +38,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies for processor
+      - name: Install dependencies
         run: |
           pip install sudachipy SudachiDict-full
           pip install requests beautifulsoup4 supabase
