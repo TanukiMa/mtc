@@ -27,7 +27,7 @@ jobs:
       uses: actions/checkout@v4
     
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         cache: 'pip'
@@ -133,12 +133,17 @@ jobs:
       run: |
         python --version
         java -version
-        llama-cli --help | head -5
+        echo "🧪 llama-cli version and capabilities:"
+        llama-cli --version || llama-cli --help | head -3
         echo "SUPABASE_URL: ${SUPABASE_URL:0:20}..."
         echo "Model path: $LLAMA_MODEL_PATH"
         echo "CLI path: $LLAMA_CLI_PATH"
         ls -la models/
         file models/ggml-model-Q4_K_M.gguf
+        
+        # パッケージソース確認
+        echo "📦 Installed llama.cpp package info:"
+        dpkg -l | grep llama || echo "Package info not found"
     
     - name: Initialize Supabase dictionary
       run: |
@@ -240,9 +245,9 @@ jobs:
     
     - name: Upload logs (on failure)
       if: failure()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: crawler-logs
+        name: crawler-logs-${{ github.run_id }}
         path: |
           *.log
           /tmp/crawler_*.txt
