@@ -9,7 +9,7 @@ on:
       max_workers:
         description: '並列処理数'
         required: false
-        default: '3'
+        default: '1'  # デフォルトを1に削減（LLMタイムアウト対策）
         type: string
 
 env:
@@ -64,99 +64,490 @@ jobs:
         
         echo "✅ すべての依存関係インストール完了"
     
-    - name: Install llama.cpp from Debian sid (with GPG fix)
-      run: |
-        echo "🔧 llama.cpp インストール中（Debian sid リポジトリから）"
-        
-        # Debian GPGキーを追加（署名検証のため）
-        echo "🔑 Debian GPGキー追加中..."
-        sudo apt-get install -y gnupg
-        
-        # Debian公式GPGキーを追加
-        wget -qO- https://ftp-master.debian.org/keys/archive-key-12.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg
-        wget -qO- https://ftp-master.debian.org/keys/archive-key-12-security.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/debian-archive-keyring-security.gpg
-        
-        # sidリポジトリ追加
-        echo "📦 Debian sidリポジトリ追加中..."
-        echo "deb http://deb.debian.org/debian sid main" | sudo tee /etc/apt/sources.list.d/sid.list
-        
-        # 優先度設定（sidからは必要なパッケージのみ）
-        sudo tee /etc/apt/preferences.d/llama-cpp-pin << 'EOF'
-        Package: llama.cpp
-        Pin: release a=sid
-        Pin-Priority: 500
+name: 厚労省サイト専門用語解析 (辞書ベース判定)
 
-        Package: *
-        Pin: release a=sid
-        Pin-Priority: 100
-        EOF
+on:
+  schedule:
+    # 毎日午前2時（JST 11時）に実行
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # 手動実行も可能
+    inputs:
+      max_workers:
+        description: '並列処理数'
+        required: false
+        default: '3'  # LLM不使用のため元の値に戻す
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
+jobs:
+  analyze-mhlw-terms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # LLM削除で2時間に短縮
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install system dependencies (minimal)
+      run: |
+        sudo apt-get update
+        # LLM不使用のためさらに軽量化
+        echo "✅ システム依存関係は最小限（辞書ベース判定）"
+    
+    - name: Install Python dependencies (SudachiDict-full only)
+      run: |
+        python -m pip install --upgrade pip
         
-        # パッケージリスト更新
-        echo "🔄 パッケージリスト更新中..."
-        if ! sudo apt update; then
-            echo "⚠️  GPG署名エラーが継続する場合、ソースビルドにフォールバック"
+        echo "📦 Python依存関係インストール中..."
+        pip install \
+          requests==2.31.0 \
+          beautifulsoup4==4.12.2 \
+          supabase==2.0.2 \
+          sudachipy==0.6.7 \
+          sudachidict_core \
+          SudachiDict-full \
+          python-docx==0.8.11 \
+          python-pptx==0.6.22 \
+          PyPDF2==3.0.1 \
+          lxml==4.9.3
+        
+        echo "✅ 依存関係インストール完了（LLM関連なし）"
+        
+        # インストール確認
+        echo "📚 Sudachi辞書確認:"
+        pip list | grep -i sudachi
+    
+    - name: Setup and Test SudachiDict-full (dictionary-based detection)
+      run: |
+        echo "🔤 SudachiDict-full 設定・動作確認（辞書ベース判定）"
+        
+        # SudachiPy設定ファイル作成（Full辞書指定）
+        mkdir -p ~/.sudachi
+        python -c "
+        import json
+        import os
+        from pathlib import Path
+        
+        # SudachiDict-fullのパスを探す
+        try:
+            import sudachidict_full
+            full_dict_path = Path(sudachidict_full.__file__).parent / 'resources' / 'system.dic'
+            print(f'📍 SudachiDict-full パス: {full_dict_path}')
+        except ImportError:
+            print('⚠️  SudachiDict-fullが見つかりません')
+            # フォールバック設定
+            full_dict_path = None
+        
+        # 設定ファイル作成
+        config = {
+            'systemDict': str(full_dict_path) if full_dict_path and full_dict_path.exists() else None,
+            'characterDefinitionFile': 'char.def',
+            'inputTextPlugin': [],
+            'oovProviderPlugin': [],
+            'pathRewritePlugin': [],
+            'connectPlugin': []
+        }
+        
+        config_path = Path.home() / '.sudachi' / 'sudachi.json'
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        print(f'📄 設定ファイル作成: {config_path}')
+        "
+        
+        # 動作確認とテスト実行
+        python -c "
+        import time
+        from sudachipy import tokenizer, dictionary
+        
+        print('🚀 SudachiDict-full 初期化中（辞書ベース判定）...')
+        start_time = time.time()
+        
+        try:
+            # 設定ファイルを使用して辞書初期化
+            tokenizer_obj = dictionary.Dictionary().create()
+            init_time = time.time() - start_time
+            print(f'⏱️  初期化完了: {init_time:.2f}秒')
             
-            # フォールバック: ソースビルド
-            echo "🛠️  llama.cpp ソースビルドを実行中..."
-            sudo apt-get install -y build-essential cmake
+            # 辞書ベース新語判定テスト
+            test_cases = [
+                ('テレメディシン', '既知語か新語かテスト'),
+                ('遠隔診療', '既知語か新語かテスト'), 
+                ('DX推進', '新語候補'),
+                ('医療従事者', '既知語'),
+                ('PHRシステム', '新語候補')
+            ]
             
-            git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp
-            cd /tmp/llama.cpp
-            make -j$(nproc) LLAMA_NO_ACCELERATE=1
-            sudo cp main /usr/local/bin/llama-cli
-            sudo cp server /usr/local/bin/llama-server
-            echo "LLAMA_CLI_PATH=/usr/local/bin/llama-cli" >> $GITHUB_ENV
-            echo "✅ llama.cpp ソースビルド完了"
+            print('\\n📝 辞書ベース新語判定テスト:')
+            print('=' * 50)
             
-        else
-            # パッケージインストール成功の場合
-            echo "📦 llama.cpp パッケージインストール中..."
-            if sudo apt install -y llama.cpp; then
-                echo "LLAMA_CLI_PATH=llama-cli" >> $GITHUB_ENV
-                echo "✅ llama.cpp パッケージインストール完了"
-            else
-                echo "❌ パッケージインストール失敗、ソースビルドにフォールバック"
+            for word, description in test_cases:
+                start = time.time()
+                tokens = tokenizer_obj.tokenize(word, tokenizer.Tokenizer.SplitMode.A)
+                parse_time = time.time() - start
                 
-                # フォールバック処理
-                sudo apt-get install -y build-essential cmake
-                git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp
-                cd /tmp/llama.cpp
-                make -j$(nproc) LLAMA_NO_ACCELERATE=1
-                sudo cp main /usr/local/bin/llama-cli
-                sudo cp server /usr/local/bin/llama-server
-                echo "LLAMA_CLI_PATH=/usr/local/bin/llama-cli" >> $GITHUB_ENV
-                echo "✅ llama.cpp フォールバックビルド完了"
-            fi
+                # 辞書収載判定（簡易版）
+                is_single_token = len(tokens) == 1
+                token_surface = tokens[0].surface() if tokens else ''
+                matches_input = token_surface == word if tokens else False
+                
+                status = '既知語（辞書収載済み）' if (is_single_token and matches_input) else '新語候補（辞書未収載）'
+                
+                print(f'  {word}: {status}')
+                print(f'    解析結果: {[t.surface() for t in tokens]}')
+                print(f'    解析時間: {parse_time*1000:.1f}ms')
+                print()
+            
+            print(f'✅ SudachiDict-full 辞書ベース判定テスト完了')
+            print('🎯 LLM不使用で高速・確実な新語検出が可能です')
+            
+        except Exception as e:
+            print(f'❌ SudachiDict-full エラー: {e}')
+            raise
+        "
+    
+    - name: Create cache directories
+      run: |
+        mkdir -p ~/.cache/sudachi
+        mkdir -p /tmp
+        echo "📁 キャッシュディレクトリ作成完了"
+    
+    - name: Verify complete environment (without LLM)
+      run: |
+        echo "🔍 環境確認・動作検証（辞書ベース）"
+        echo "================================"
+        
+        echo "🐍 Python環境:"
+        python --version
+        
+        echo "🔤 SudachiPy + Full辞書 最終確認:"
+        python -c "
+        from sudachipy import dictionary, tokenizer
+        import os
+        tokenizer_obj = dictionary.Dictionary().create()
+        # 正しいSplitMode列挙型を使用
+        tokens = tokenizer_obj.tokenize('厚労省', tokenizer.Tokenizer.SplitMode.A)
+        print(f'✅ SudachiDict-full 準備完了 (テスト: {len(tokens)}トークン)')
+        "
+        
+        echo "🗄️ Supabase接続確認:"
+        echo "SUPABASE_URL: ${SUPABASE_URL:0:30}..."
+        
+        echo "📦 インストール状況:"
+        # SudachiDict確認
+        echo "📚 Sudachi辞書確認:"
+        pip list | grep -i sudachi
+        
+        echo "✅ 環境検証完了 - 辞書ベース判定準備完了"
+        echo "💡 LLMは使用せず、SudachiDict-full（170万語）との照合で新語検出"
+    
+    - name: Initialize Supabase dictionary (service_role key)
+      run: |
+        echo "🗄️ Supabase 基本辞書初期化（service_role key使用）"
+        
+        python3 << 'EOF'
+        import os
+        from supabase import create_client
+        
+        print("📡 Supabase接続中（service_role key使用）...")
+        
+        # service_role keyで接続（RLS無視）
+        client = create_client(
+            os.environ['SUPABASE_URL'], 
+            os.environ['SUPABASE_KEY']
+        )
+        
+        # 基本辞書データ
+        basic_words = [
+            {'word': '医療', 'reading': 'イリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '厚生労働省', 'reading': 'コウセイロウドウショウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '健康', 'reading': 'ケンコウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '診療', 'reading': 'シンリョウ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '薬事', 'reading': 'ヤクジ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '保険', 'reading': 'ホケン', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '介護', 'reading': 'カイゴ', 'part_of_speech': '名詞', 'source': 'basic'},
+            {'word': '福祉', 'reading': 'フクシ', 'part_of_speech': '名詞', 'source': 'basic'}
+        ]
+        
+        try:
+            # 既存データ確認
+            existing_count = client.table('dictionary_words').select('id', count='exact').execute()
+            print(f"📊 既存辞書語彙数: {existing_count.count}語")
+            
+            if existing_count.count == 0:
+                print("📝 基本辞書初期化中...")
+                result = client.table('dictionary_words').insert(basic_words).execute()
+                print(f"✅ 基本辞書を初期化しました ({len(result.data)}語)")
+            else:
+                print("ℹ️  辞書は既に初期化済みです")
+            
+            # 最終統計
+            final_count = client.table('dictionary_words').select('id', count='exact').execute()
+            print(f"📚 現在の辞書語彙数: {final_count.count}語")
+            
+        except Exception as e:
+            print(f"❌ Supabase操作エラー: {e}")
+            # service_role keyなら権限問題は発生しないはず
+            raise e
+            
+        print("✅ Supabase辞書初期化完了")
+        EOF
+    
+    - name: Run MHLW crawler (dictionary-based detection)
+      env:
+        MAX_WORKERS: ${{ github.event.inputs.max_workers || '3' }}
+      run: |
+        echo "🚀 厚労省サイト解析クローラー実行開始"
+        echo "====================================="
+        echo "設定:"
+        echo "  - 並列処理数: $MAX_WORKERS"
+        echo "  - 辞書: SudachiDict-full (170万語)"
+        echo "  - 新語判定: 辞書ベース（LLM不使用）"
+        echo "  - 対象: 厚労省サイト（HTML, PDF, DOCX, PPTX）"
+        echo ""
+        
+        # Pythonパス確認
+        echo "🐍 Python環境確認:"
+        python --version
+        which python
+        echo "PYTHONPATH: ${PYTHONPATH:-未設定}"
+        
+        # 必要なファイルの存在確認
+        echo "📁 ファイル確認:"
+        if [ -f "main_crawler.py" ]; then
+            echo "✅ main_crawler.py 存在"
+            echo "📄 ファイルサイズ: $(wc -c < main_crawler.py) bytes"
+            echo "📄 先頭5行:"
+            head -5 main_crawler.py
+        else
+            echo "❌ main_crawler.py が見つかりません"
+            echo "📂 現在のディレクトリ内容:"
+            ls -la
+            echo "❌ クローラー実行を停止します"
+            exit 1
         fi
         
-        # 動作確認
-        echo "🧪 llama-cli 動作確認:"
-        $LLAMA_CLI_PATH --help | head -5 || echo "バイナリパスを確認中..."
+        echo ""
+        echo "🎯 クローラー実行開始..."
+        echo "======================"
         
-        # パスが正しく設定されているか確認
-        which llama-cli >/dev/null 2>&1 && echo "✅ llama-cli found in PATH" || echo "ℹ️  llama-cli custom path: $LLAMA_CLI_PATH"
+        python3 << 'EOF'
+        import sys
+        import os
+        import traceback
+        from datetime import datetime
+        import importlib.util
+        
+        print(f"🕒 実行開始時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🔧 Python版: {sys.version}")
+        print(f"📂 作業ディレクトリ: {os.getcwd()}")
+        print(f"🛣️  Python Path: {sys.path[:3]}...")
+        
+        # main_crawler.pyの存在確認
+        crawler_path = os.path.join(os.getcwd(), 'main_crawler.py')
+        if not os.path.exists(crawler_path):
+            print(f"❌ {crawler_path} が存在しません")
+            print("📂 ディレクトリ内容:")
+            for item in os.listdir('.'):
+                print(f"  - {item}")
+            sys.exit(1)
+        
+        # モジュールのインポート確認
+        try:
+            print("📦 依存関係インポートテスト...")
+            
+            # 主要ライブラリのインポート確認
+            import requests
+            print(f"  ✅ requests: {requests.__version__}")
+            
+            from sudachipy import tokenizer, dictionary
+            print("  ✅ sudachipy: インポート成功")
+            
+            from supabase import create_client
+            print("  ✅ supabase: インポート成功")
+            
+            print("📦 全ての依存関係が利用可能です")
+            
+        except ImportError as e:
+            print(f"❌ 依存関係インポートエラー: {e}")
+            sys.exit(1)
+        
+        # メインクローラーのインポートと実行
+        try:
+            print("🔄 main_crawler モジュールのインポート中...")
+            
+            # sys.pathに現在のディレクトリを追加
+            if os.getcwd() not in sys.path:
+                sys.path.insert(0, os.getcwd())
+            
+            # インポート実行
+            from main_crawler import MhlwCrawler
+            print("✅ MhlwCrawler クラスのインポート成功")
+            
+            # クローラーインスタンス作成
+            print("🔧 クローラーインスタンス作成中...")
+            crawler = MhlwCrawler()
+            print("✅ クローラーインスタンス作成成功（辞書ベース判定）")
+            
+            # 実行パラメータ
+            max_workers = int(os.environ.get('MAX_WORKERS', '3'))
+            print(f"👥 並列処理数: {max_workers}")
+            
+            # *** メイン実行 ***
+            print("🚀 クローリング・解析開始...")
+            print("-" * 40)
+            
+            crawler.run(max_workers=max_workers)
+            
+            print("-" * 40)
+            print(f"🕒 実行完了時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print("✅ 厚労省サイト解析完了（辞書ベース新語検出）")
+            
+        except Exception as e:
+            print(f"❌ クローラー実行エラー: {e}")
+            print("🔍 詳細なエラー情報:")
+            traceback.print_exc()
+            
+            # エラー診断
+            error_str = str(e)
+            if "ModuleNotFoundError" in error_str:
+                print("💡 モジュール不足の可能性があります")
+            elif "Permission" in error_str:
+                print("💡 権限問題の可能性があります")
+            elif "Connection" in error_str:
+                print("💡 ネットワーク接続問題の可能性があります")
+            
+            sys.exit(1)
+        EOF
+        
+        echo ""
+        echo "🎉 クローラー実行ステップ完了"
     
-    - name: Download LLM model with huggingface-cli
+    - name: Generate detailed analysis report (dictionary-based)
+      if: always()
       run: |
-        echo "🤖 日本語LLMモデルダウンロード中..."
-        mkdir -p models
+        echo "📊 解析結果レポート生成中（辞書ベース判定）..."
         
-        # 日本語対応の軽量モデルをダウンロード
-        huggingface-cli download \
-          mmnga/ELYZA-japanese-Llama-2-7b-fast-instruct-gguf \
-          ELYZA-japanese-Llama-2-7b-fast-instruct-q4_0.gguf \
-          --local-dir models \
-          --local-dir-use-symlinks False
+        python3 << 'EOF'
+        import os
+        from supabase import create_client
+        from datetime import datetime, timedelta
         
-        # モデルファイル名を統一
-        mv models/ELYZA-japanese-Llama-2-7b-fast-instruct-q4_0.gguf models/ggml-model-Q4_K_M.gguf
+        client = create_client(os.environ['SUPABASE_URL'], os.environ['SUPABASE_KEY'])
         
-        echo "LLAMA_MODEL_PATH=$(pwd)/models/ggml-model-Q4_K_M.gguf" >> $GITHUB_ENV
+        # 今日の結果サマリー
+        today = datetime.now().date()
         
-        # ファイルサイズ確認
-        echo "📊 ダウンロード完了:"
-        ls -lh models/ggml-model-Q4_K_M.gguf
-        echo "✅ LLMモデル準備完了"
+        print("📈 厚労省サイト専門用語解析結果")
+        print("=" * 50)
+        print(f"🕒 実行日時: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🔤 使用辞書: SudachiDict-full (170万語)")
+        print(f"🧠 判定方式: 辞書ベース（LLM不使用）")
+        print("")
+        
+        # 新語候補数
+        try:
+            new_words = client.table('new_word_candidates')\
+                .select('*')\
+                .gte('created_at', today.isoformat())\
+                .execute()
+            
+            # 処理URL数
+            processed = client.table('processed_urls')\
+                .select('*')\
+                .gte('created_at', today.isoformat())\
+                .execute()
+            
+            # 抽出された全単語数
+            extracted = client.table('extracted_words')\
+                .select('*')\
+                .gte('first_found', today.isoformat())\
+                .execute()
+            
+            print(f"📄 処理済URL: {len(processed.data)}件")
+            print(f"🔤 抽出単語: {len(extracted.data)}語")
+            print(f"🆕 新語候補: {len(new_words.data)}語")
+            
+            if new_words.data:
+                print(f"📊 新語発見率: {len(new_words.data)/max(len(extracted.data),1)*100:.1f}%")
+                
+                print("\\n🔍 発見された新語候補 TOP 15:")
+                print("-" * 50)
+                
+                # 信頼度でソート
+                sorted_words = sorted(new_words.data, 
+                                    key=lambda x: x.get('confidence_score', 0), 
+                                    reverse=True)
+                
+                for i, word in enumerate(sorted_words[:15], 1):
+                    word_text = word.get('word', 'N/A')
+                    reading = word.get('reading', '不明')
+                    confidence = word.get('confidence_score', 0)
+                    pos = word.get('part_of_speech', '不明')
+                    reasoning = word.get('llm_reasoning', '判定理由不明')[:60]
+                    
+                    print(f"{i:2d}. {word_text} ({reading})")
+                    print(f"    品詞: {pos} | 信頼度: {confidence:.3f}")
+                    print(f"    判定: {reasoning}...")
+                    print()
+            else:
+                print("ℹ️  今回の実行では新語候補は見つかりませんでした")
+            
+            # 辞書統計
+            total_dict = client.table('dictionary_words').select('id', count='exact').execute()
+            print(f"📚 Supabase基本辞書語彙数: {total_dict.count:,}語")
+            print(f"📖 SudachiDict-full: 約170万語")
+            print(f"🎯 新語判定: 両辞書に未収載の名詞（3文字以上）")
+            
+        except Exception as e:
+            print(f"⚠️  レポート生成エラー: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print("\\n✅ 解析完了")
+        print("🎯 SudachiDict-fullによる辞書ベース高速新語検出が完了しました")
+        print("⚡ LLM不使用により、タイムアウト無し・高速処理を実現")
+        EOF
+    
+    - name: Cleanup and optimize storage
+      if: always()
+      run: |
+        echo "🧹 クリーンアップ実行中..."
+        
+        # 一時ファイル削除
+        rm -rf /tmp/*.pdf /tmp/*.docx /tmp/*.pptx /tmp/*.txt
+        
+        # pip キャッシュクリア（容量節約）
+        pip cache purge
+        
+        # ディスク使用量確認
+        echo "💽 ディスク使用量:"
+        df -h | head -2
+        
+        echo "✅ クリーンアップ完了"
+    
+    - name: Upload comprehensive logs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mhlw-crawler-logs-${{ github.run_id }}
+        path: |
+          *.log
+          /tmp/crawler_*.txt
+          /tmp/sudachi_*.log
+          /var/log/syslog
+        retention-days: 14
+        if-no-files-found: ignore
     
     - name: Setup and Test SudachiDict-full
       run: |
@@ -416,12 +807,12 @@ jobs:
     
     - name: Run MHLW crawler (with enhanced debugging)
       env:
-        MAX_WORKERS: ${{ github.event.inputs.max_workers || '3' }}
+        MAX_WORKERS: ${{ github.event.inputs.max_workers || '1' }}  # デフォルト1に削減
       run: |
         echo "🚀 厚労省サイト解析クローラー実行開始"
         echo "====================================="
         echo "設定:"
-        echo "  - 並列処理数: $MAX_WORKERS"
+        echo "  - 並列処理数: $MAX_WORKERS（LLMタイムアウト対策で削減）"
         echo "  - 辞書: SudachiDict-full (170万語)"
         echo "  - 対象: 厚労省サイト（HTML, PDF, DOCX, PPTX）"
         echo "  - LLMモデル: $LLAMA_MODEL_PATH"
