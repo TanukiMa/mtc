@@ -18,7 +18,7 @@ from sudachipy import dictionary
 # --- 設定項目 ---
 START_URL = "https://www.mhlw.go.jp/"
 TARGET_DOMAIN = "www.mhlw.go.jp"
-MAX_URLS_TO_CRAWL = 200
+MAX_URLS_TO_CRAWL = 100000000
 MAX_WORKERS = 8
 RECRAWL_DAYS = 30
 REQUEST_TIMEOUT = 15
