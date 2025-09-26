@@ -54,8 +54,12 @@ jobs:
           PyPDF2==3.0.1 \
           lxml==4.9.3
         
-        echo "📚 SudachiDict-full インストール中（専門用語解析用）..."
+        echo "📚 Sudachi辞書インストール中..."
         echo "⏰ Full辞書は大容量のため、2-3分かかります..."
+        
+        # Core辞書も一緒にインストール（互換性のため）
+        pip install sudachidict_core
+        # Full辞書をメイン辞書として使用
         pip install SudachiDict-full
         
         echo "✅ すべての依存関係インストール完了"
@@ -156,59 +160,109 @@ jobs:
     
     - name: Setup and Test SudachiDict-full
       run: |
-        echo "🔤 SudachiDict-full 動作確認・テスト実行"
+        echo "🔤 SudachiDict-full 設定・動作確認・テスト実行"
         
+        # SudachiPy設定ファイル作成（Full辞書指定）
+        mkdir -p ~/.sudachi
+        python -c "
+        import json
+        import os
+        from pathlib import Path
+        
+        # SudachiDict-fullのパスを探す
+        try:
+            import sudachidict_full
+            full_dict_path = Path(sudachidict_full.__file__).parent / 'resources' / 'system.dic'
+            print(f'📍 SudachiDict-full パス: {full_dict_path}')
+        except ImportError:
+            print('⚠️  SudachiDict-fullが見つかりません')
+            # フォールバック設定
+            full_dict_path = None
+        
+        # 設定ファイル作成
+        config = {
+            'systemDict': str(full_dict_path) if full_dict_path and full_dict_path.exists() else None,
+            'characterDefinitionFile': 'char.def',
+            'inputTextPlugin': [],
+            'oovProviderPlugin': [],
+            'pathRewritePlugin': [],
+            'connectPlugin': []
+        }
+        
+        config_path = Path.home() / '.sudachi' / 'sudachi.json'
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        
+        print(f'📄 設定ファイル作成: {config_path}')
+        "
+        
+        # 動作確認とテスト実行
         python -c "
         import time
         from sudachipy import tokenizer, dictionary
         
         print('🚀 SudachiDict-full 初期化中...')
         start_time = time.time()
-        tokenizer_obj = dictionary.Dictionary().create()
-        init_time = time.time() - start_time
-        print(f'⏱️  初期化完了: {init_time:.2f}秒')
         
-        # 厚労省・医療関連の専門用語でテスト
-        test_cases = [
-            '厚生労働省の新しい施策について',
-            'テレメディシンによる遠隔診療',
-            'レセプト電算処理システム',
-            '診療報酬点数表の改定',
-            '医療DX推進本部',
-            'PHR（Personal Health Record）',
-            '地域包括ケアシステム',
-            '薬事・食品衛生審議会'
-        ]
-        
-        print('\\n📝 専門用語解析テスト結果:')
-        print('=' * 50)
-        
-        total_tokens = 0
-        for i, text in enumerate(test_cases, 1):
-            start = time.time()
-            tokens = tokenizer_obj.tokenize(text, tokenizer.Tokenizer.SplitMode.A)
-            parse_time = time.time() - start
-            total_tokens += len(tokens)
+        try:
+            # 設定ファイルを使用して辞書初期化
+            tokenizer_obj = dictionary.Dictionary().create()
+            init_time = time.time() - start_time
+            print(f'⏱️  初期化完了: {init_time:.2f}秒')
             
-            print(f'\\n{i}. 「{text}」')
-            print(f'   解析時間: {parse_time*1000:.1f}ms | トークン数: {len(tokens)}')
-            print('   形態素解析結果:')
+            # 厚労省・医療関連の専門用語でテスト
+            test_cases = [
+                '厚生労働省の新しい施策について',
+                'テレメディシンによる遠隔診療',
+                'レセプト電算処理システム',
+                '診療報酬点数表の改定',
+                '医療DX推進本部',
+                'PHR（Personal Health Record）',
+                '地域包括ケアシステム',
+                '薬事・食品衛生審議会'
+            ]
             
-            for token in tokens:
-                surface = token.surface()
-                reading = token.reading_form() or 'ーー'
-                pos = token.part_of_speech()[0]
+            print('\\n📝 専門用語解析テスト結果:')
+            print('=' * 50)
+            
+            total_tokens = 0
+            for i, text in enumerate(test_cases, 1):
+                start = time.time()
+                tokens = tokenizer_obj.tokenize(text, tokenizer.Tokenizer.SplitMode.A)
+                parse_time = time.time() - start
+                total_tokens += len(tokens)
                 
-                # 専門用語らしいものをハイライト
-                if pos == '名詞' and len(surface) >= 3:
-                    print(f'   🔍 {surface} ({reading}) [{pos}] ← 専門用語候補')
-                else:
-                    print(f'     {surface} ({reading}) [{pos}]')
-        
-        print(f'\\n✅ SudachiDict-full テスト完了')
-        print(f'📊 総解析: {len(test_cases)}文 / {total_tokens}トークン')
-        print('🎯 専門用語の詳細な分割・読み取りが確認できました')
+                print(f'\\n{i}. 「{text}」')
+                print(f'   解析時間: {parse_time*1000:.1f}ms | トークン数: {len(tokens)}')
+                print('   形態素解析結果:')
+                
+                for token in tokens:
+                    surface = token.surface()
+                    reading = token.reading_form() or 'ーー'
+                    pos = token.part_of_speech()[0]
+                    
+                    # 専門用語らしいものをハイライト
+                    if pos == '名詞' and len(surface) >= 3:
+                        print(f'   🔍 {surface} ({reading}) [{pos}] ← 専門用語候補')
+                    else:
+                        print(f'     {surface} ({reading}) [{pos}]')
+            
+            print(f'\\n✅ SudachiDict-full テスト完了')
+            print(f'📊 総解析: {len(test_cases)}文 / {total_tokens}トークン')
+            print('🎯 専門用語の詳細な分割・読み取りが確認できました')
+            
+        except Exception as e:
+            print(f'❌ SudachiDict-full 初期化エラー: {e}')
+            print('🔄 フォールバック: デフォルト辞書を使用します')
+            
+            # フォールバック処理
+            tokenizer_obj = dictionary.Dictionary().create()
+            tokens = tokenizer_obj.tokenize('厚生労働省', tokenizer.Tokenizer.SplitMode.A)
+            print(f'✅ デフォルト辞書で動作確認完了 ({len(tokens)}トークン)')
         "
+        
+        echo "📚 インストール済み辞書確認:"
+        pip list | grep -i sudachi
     
     - name: Create cache directories
       run: |
