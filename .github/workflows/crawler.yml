@@ -438,6 +438,8 @@ jobs:
         echo "📁 ファイル確認:"
         if [ -f "main_crawler.py" ]; then
             echo "✅ main_crawler.py 存在"
+            echo "📄 ファイルサイズ: $(wc -c < main_crawler.py) bytes"
+            echo "📄 先頭5行:"
             head -5 main_crawler.py
         else
             echo "❌ main_crawler.py が見つかりません"
