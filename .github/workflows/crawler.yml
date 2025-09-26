@@ -292,11 +292,11 @@ jobs:
         
         echo "🔤 SudachiPy + Full辞書 最終確認:"
         python -c "
-        from sudachipy import dictionary
+        from sudachipy import dictionary, tokenizer
         import os
         tokenizer_obj = dictionary.Dictionary().create()
-        # 簡単なテスト
-        tokens = tokenizer_obj.tokenize('厚労省', 1)
+        # 正しいSplitMode列挙型を使用
+        tokens = tokenizer_obj.tokenize('厚労省', tokenizer.Tokenizer.SplitMode.A)
         print(f'✅ SudachiDict-full 準備完了 (テスト: {len(tokens)}トークン)')
         "
         
