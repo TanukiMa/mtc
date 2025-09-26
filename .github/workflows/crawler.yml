@@ -60,33 +60,77 @@ jobs:
         
         echo "✅ すべての依存関係インストール完了"
     
-    - name: Install llama.cpp from Debian sid
+    - name: Install llama.cpp from Debian sid (with GPG fix)
       run: |
         echo "🔧 llama.cpp インストール中（Debian sid リポジトリから）"
         
-        # sidリポジトリ追加（最小限の影響に限定）
+        # Debian GPGキーを追加（署名検証のため）
+        echo "🔑 Debian GPGキー追加中..."
+        sudo apt-get install -y gnupg
+        
+        # Debian公式GPGキーを追加
+        wget -qO- https://ftp-master.debian.org/keys/archive-key-12.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/debian-archive-keyring.gpg
+        wget -qO- https://ftp-master.debian.org/keys/archive-key-12-security.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/debian-archive-keyring-security.gpg
+        
+        # sidリポジトリ追加
+        echo "📦 Debian sidリポジトリ追加中..."
         echo "deb http://deb.debian.org/debian sid main" | sudo tee /etc/apt/sources.list.d/sid.list
         
         # 優先度設定（sidからは必要なパッケージのみ）
         sudo tee /etc/apt/preferences.d/llama-cpp-pin << 'EOF'
-        Package: llama.cpp llama.cpp-tools
+        Package: llama.cpp
         Pin: release a=sid
         Pin-Priority: 500
-        
+
         Package: *
         Pin: release a=sid
         Pin-Priority: 100
         EOF
         
-        # パッケージリスト更新とインストール
-        sudo apt update
-        sudo apt install -y llama.cpp
+        # パッケージリスト更新
+        echo "🔄 パッケージリスト更新中..."
+        if ! sudo apt update; then
+            echo "⚠️  GPG署名エラーが継続する場合、ソースビルドにフォールバック"
+            
+            # フォールバック: ソースビルド
+            echo "🛠️  llama.cpp ソースビルドを実行中..."
+            sudo apt-get install -y build-essential cmake
+            
+            git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp
+            cd /tmp/llama.cpp
+            make -j$(nproc) LLAMA_NO_ACCELERATE=1
+            sudo cp main /usr/local/bin/llama-cli
+            sudo cp server /usr/local/bin/llama-server
+            echo "LLAMA_CLI_PATH=/usr/local/bin/llama-cli" >> $GITHUB_ENV
+            echo "✅ llama.cpp ソースビルド完了"
+            
+        else
+            # パッケージインストール成功の場合
+            echo "📦 llama.cpp パッケージインストール中..."
+            if sudo apt install -y llama.cpp; then
+                echo "LLAMA_CLI_PATH=llama-cli" >> $GITHUB_ENV
+                echo "✅ llama.cpp パッケージインストール完了"
+            else
+                echo "❌ パッケージインストール失敗、ソースビルドにフォールバック"
+                
+                # フォールバック処理
+                sudo apt-get install -y build-essential cmake
+                git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama.cpp
+                cd /tmp/llama.cpp
+                make -j$(nproc) LLAMA_NO_ACCELERATE=1
+                sudo cp main /usr/local/bin/llama-cli
+                sudo cp server /usr/local/bin/llama-server
+                echo "LLAMA_CLI_PATH=/usr/local/bin/llama-cli" >> $GITHUB_ENV
+                echo "✅ llama.cpp フォールバックビルド完了"
+            fi
+        fi
         
         # 動作確認
         echo "🧪 llama-cli 動作確認:"
-        llama-cli --help | head -5
-        echo "LLAMA_CLI_PATH=llama-cli" >> $GITHUB_ENV
-        echo "✅ llama.cpp インストール完了"
+        $LLAMA_CLI_PATH --help | head -5 || echo "バイナリパスを確認中..."
+        
+        # パスが正しく設定されているか確認
+        which llama-cli >/dev/null 2>&1 && echo "✅ llama-cli found in PATH" || echo "ℹ️  llama-cli custom path: $LLAMA_CLI_PATH"
     
     - name: Download LLM model with huggingface-cli
       run: |
@@ -181,7 +225,16 @@ jobs:
         python --version
         
         echo "🤖 llama-cli確認:"
-        llama-cli --version 2>/dev/null || llama-cli --help | head -3
+        if command -v llama-cli >/dev/null 2>&1; then
+            echo "✅ llama-cli found in PATH"
+            llama-cli --version 2>/dev/null || llama-cli --help | head -3
+        elif [ -f "/usr/local/bin/llama-cli" ]; then
+            echo "✅ llama-cli found at /usr/local/bin/llama-cli (source build)"
+            /usr/local/bin/llama-cli --version 2>/dev/null || /usr/local/bin/llama-cli --help | head -3
+        else
+            echo "❌ llama-cli not found"
+            exit 1
+        fi
         
         echo "🔤 SudachiPy + Full辞書 最終確認:"
         python -c "
@@ -199,10 +252,23 @@ jobs:
         echo "🤖 LLMモデル確認:"
         echo "Model path: $LLAMA_MODEL_PATH"
         echo "CLI path: $LLAMA_CLI_PATH"
-        file models/ggml-model-Q4_K_M.gguf
+        if [ -f "$LLAMA_MODEL_PATH" ]; then
+            file "$LLAMA_MODEL_PATH"
+        else
+            echo "❌ Model file not found: $LLAMA_MODEL_PATH"
+        fi
         
-        echo "📦 インストール済みパッケージ:"
-        dpkg -l | grep llama || echo "llama.cpp package not found in dpkg"
+        echo "📦 インストール状況:"
+        # パッケージ版の確認
+        if dpkg -l | grep -q llama; then
+            echo "✅ llama.cpp package installed:"
+            dpkg -l | grep llama
+        else
+            echo "ℹ️  llama.cpp installed via source build"
+        fi
+        
+        # SudachiDict確認
+        echo "📚 Sudachi辞書確認:"
         pip list | grep -i sudachi
         
         echo "✅ 環境検証完了 - すべて正常"
