@@ -47,6 +47,11 @@ def main():
             # DBから既存のURL情報を取得
             db_res = supabase.table("crawl_queue").select("content_hash").eq("url", url).maybe_single().execute()
             
+            # 応答がNoneの場合、このURLの処理をスキップして次に進む
+            if db_res is None:
+                print(f"  [!] DBからの応答がありませんでした。このURLをスキップします。")
+                continue
+
             # DBにURLが存在しない (新規URL)
             if db_res.data is None:
                 print(f"  [+] 新規URL発見。キューに追加します。")
@@ -64,11 +69,9 @@ def main():
                         "status": "queued",
                         "content_hash": new_hash
                     }).eq("url", url).execute()
-                # else:
-                #     print(f"  [-] コンテンツ変更なし。スキップします。")
 
             # HTMLページからのみリンクを辿る
-            content_type = response.headers.get("content-type", "").lower()
+            content_type = response.headers.get("content_type", "").lower()
             if "html" in content_type:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 for a_tag in soup.find_all('a', href=True):
