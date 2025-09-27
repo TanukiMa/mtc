@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        instance: [1, 2, 3] 
+        instance: [1] 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
