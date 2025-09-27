@@ -15,64 +15,49 @@ from supabase import create_client, Client
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# --- ヘルパー関数 (変更なし) ---
 def get_content_hash(content: bytes) -> str:
-    """コンテンツのSHA256ハッシュ値を計算する"""
     return hashlib.sha256(content).hexdigest()
 
 def intelligent_worker(url_item: dict, supabase_client, config, session):
-    """HEADリクエストで事前チェックし、変更があった場合のみ詳細な探索を行う賢いワーカー"""
+    # ... (この関数の中身は変更ありません)
     url = url_item['url']
     old_last_modified = url_item.get('last_modified')
     target_domain = config.get('General', 'TARGET_DOMAIN')
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
-    
     found_links = set()
     update_payload = None
-
     try:
         time.sleep(random.uniform(0.5, 1.0))
         head_response = session.head(url, timeout=request_timeout, headers={'User-Agent': 'Mozilla/5.0'}, allow_redirects=True)
         head_response.raise_for_status()
         new_last_modified = head_response.headers.get('Last-Modified')
-
         if old_last_modified and new_last_modified and old_last_modified == new_last_modified:
             return url, None, set()
-
         response = session.get(url, timeout=request_timeout, headers={'User-Agent': 'Mozilla/5.0'}, allow_redirects=True)
         response.raise_for_status()
-        
         content_type = response.headers.get("content-type", "").lower()
-
         if "html" in content_type:
             new_hash = get_content_hash(response.content)
-
-            # ▼▼▼ 'NoneType'エラー対策の修正 ▼▼▼
             db_res = supabase_client.table("crawl_queue").select("content_hash").eq("url", url).maybe_single().execute()
             if db_res is None or not hasattr(db_res, 'data'):
-                print(f"  [!] DB応答が不正(worker): {url}")
-                return url, None, set() # 応答がない場合は何もしない
-            # ▲▲▲ ここまで修正 ▲▲▲
-            
+                return url, None, set()
             old_hash = db_res.data.get("content_hash") if db_res.data else None
-
             if old_hash != new_hash:
                 update_payload = { "url": url, "status": "queued", "content_hash": new_hash, "last_modified": new_last_modified }
-
             soup = BeautifulSoup(response.content, 'html.parser')
             for a_tag in soup.find_all('a', href=True):
                 link = urljoin(url, a_tag['href']).split('#')[0]
                 if urlparse(link).netloc == target_domain:
                     found_links.add(link)
-
     except requests.exceptions.RequestException:
         pass
     except Exception as e:
         print(f"  [!] 不明なエラー: {url} - {e}")
-    
     return url, update_payload, found_links
 
 def parse_sitemap(sitemap_url: str, session) -> set:
-    """サイトマップXMLを解析し、URLのセットを返す"""
+    # ... (この関数の中身は変更ありません)
     print(f"[*] サイトマップを解析中: {sitemap_url}")
     try:
         response = session.get(sitemap_url, timeout=30)
@@ -86,10 +71,32 @@ def parse_sitemap(sitemap_url: str, session) -> set:
         print(f"  [!] サイトマップの解析に失敗しました: {e}")
         return set()
 
+# ▼▼▼▼▼ ページネーションで全件取得する関数を新規追加 ▼▼▼▼▼
+def fetch_all_known_urls(supabase_client: Client) -> list:
+    """ページネーションを使い、crawl_queueテーブルから全URLを取得する"""
+    all_urls = []
+    page = 0
+    page_size = 1000 # Supabaseのデフォルト上限
+    while True:
+        try:
+            start_index = page * page_size
+            end_index = start_index + page_size - 1
+            response = supabase_client.table("crawl_queue").select("id, url, last_modified").range(start_index, end_index).execute()
+            if not response.data:
+                break
+            all_urls.extend(response.data)
+            if len(response.data) < page_size:
+                break
+            page += 1
+        except Exception as e:
+            print(f"  [!] 既知URLの取得中にエラー (ページ {page}): {e}")
+            break
+    return all_urls
+# ▲▲▲▲▲ ここまで追加 ▲▲▲▲▲
+
 def main():
     config = configparser.ConfigParser()
     config.read('config.ini')
-    
     sitemap_url = config.get('Seeds', 'SITEMAP_URL', fallback=None)
     index_pages = config.get('Seeds', 'INDEX_PAGES').strip().split('\n')
     max_workers = config.getint('Discoverer', 'MAX_DISCOVER_WORKERS')
@@ -104,14 +111,11 @@ def main():
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
 
-    print("[*] DBから既知のURLリストを取得しています...")
-    try:
-        response = supabase.table("crawl_queue").select("id, url, last_modified").execute()
-        all_known_urls = response.data if response else []
-        print(f"  [+] {len(all_known_urls)}件の既知URLを取得しました。")
-    except Exception as e:
-        print(f"  [!] 既知URLの取得に失敗: {e}")
-        all_known_urls = []
+    print("[*] DBから既知のURLリストを全件取得しています...")
+    # ▼▼▼▼▼ ここを新しい関数呼び出しに変更 ▼▼▼▼▼
+    all_known_urls = fetch_all_known_urls(supabase)
+    # ▲▲▲▲▲ ここまで変更 ▲▲▲▲▲
+    print(f"  [+] {len(all_known_urls)}件の既知URLを取得しました。")
 
     target_urls = {item['url']: item for item in all_known_urls}
     
@@ -150,23 +154,17 @@ def main():
 
     if newly_discovered_links:
         print(f"[*] 発見した {len(newly_discovered_links)} 件のリンクから、新規URLをチェックします...")
-        
         all_links_list = list(newly_discovered_links)
-        # ▼▼▼▼▼ チャンクサイズを小さくする修正 ▼▼▼▼▼
-        chunk_size = 100 # 一度にDBに問い合わせるURL数を減らす
-        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+        chunk_size = 100
         truly_new_urls = []
-
         for i in range(0, len(all_links_list), chunk_size):
             chunk = all_links_list[i:i + chunk_size]
-            
             try:
                 response = supabase.table("crawl_queue").select("url").in_("url", chunk).execute()
                 existing_urls_in_chunk = {item['url'] for item in response.data}
                 truly_new_urls.extend([url for url in chunk if url not in existing_urls_in_chunk])
             except Exception as db_e:
                 print(f"  [!] 新規URLの存在チェック中にDBエラー: {db_e}")
-
         if truly_new_urls:
             print(f"[*] {len(truly_new_urls)}件の全く新しいURLをキューに追加します。")
             for i in range(0, len(truly_new_urls), chunk_size):
