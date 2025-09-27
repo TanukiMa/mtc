@@ -30,16 +30,14 @@ def get_text_from_html(content: bytes) -> str:
     except Exception as e:
         raise RuntimeError(f"HTML解析エラー: {e}")
 
-# ▼▼▼▼▼ チャンク分割ロジックを再導入 ▼▼▼▼▼
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
     """sudachipyを使い、未知の普通名詞を抽出する。長文は分割して処理する。"""
     if not text.strip() or not tokenizer_obj: return []
     
-    chunk_size = 40000  # sudachipyのバイト制限より安全に小さい値
+    chunk_size = 40000
     words = []
 
     try:
-        # テキストをチャンクに分割してループ処理
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             morphemes = tokenizer_obj.tokenize(chunk)
@@ -52,7 +50,6 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
         print(f"  [!] Sudachi解析エラー: {e}")
 
     return words
-# ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int):
     global _WORKER_TOKENIZER
@@ -87,9 +84,8 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
             filtered_words = [w for w in new_words if w["word"] not in stop_words_set]
             
             if filtered_words:
-                # ▼▼▼▼▼ 古い出現記録を削除するロジックを再導入 ▼▼▼▼▼
+                # 新しい単語を登録する前に、このURLに関する古い出現記録をすべて削除
                 supabase.table("word_occurrences").delete().eq("source_url", url).execute()
-                # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
                 for word_data in filtered_words:
                     upsert_res = supabase.table("unique_words").upsert(
