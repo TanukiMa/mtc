@@ -140,7 +140,7 @@ def main():
         # ▼▼▼▼▼ ここからが修正箇所 ▼▼▼▼▼
         # 全リンクをチャンクに分割
         all_links_list = list(newly_discovered_links)
-        chunk_size = 500 # 一度にDBに問い合わせるURL数
+        chunk_size = 10 # 一度にDBに問い合わせるURL数
         truly_new_urls = []
 
         for i in range(0, len(all_links_list), chunk_size):
