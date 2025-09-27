@@ -50,17 +50,19 @@ def main():
 
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-    session.mount('https://', HTTPAdapter(max_ries=retries))
+    
+    # ▼▼▼▼▼ ここでタイプミスを修正 ▼▼▼▼▼
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    session.mount('http://', HTTPAdapter(max_retries=retries))
+    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
     all_discovered_links = set()
     
-    # インデックスページ群を並列処理
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_url = {executor.submit(fetch_links_from_url, url, config, session): url for url in index_pages}
         
         for future in as_completed(future_to_url):
             try:
-                # 各インデックスページから見つかったリンクをすべて集約
                 all_discovered_links.update(future.result())
             except Exception as exc:
                 print(f'[!] ワーカーで例外が発生しました: {exc}')
@@ -71,7 +73,6 @@ def main():
 
     print(f"[*] {len(all_discovered_links)}件のURLを発見しました。キューに追加します...")
     
-    # 発見したURLをDBに一括登録 (存在すれば無視される)
     try:
         supabase.table("crawl_queue").upsert(
             [{"url": link, "status": "queued"} for link in all_discovered_links], 
