@@ -17,7 +17,7 @@ _WORKER_TOKENIZER = None
 
 # --- テキスト抽出・解析関連の関数群 (内容は変更なし) ---
 def get_content_hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
+    return hashlib.sha2sha256(content).hexdigest()
 
 def clean_text(text: str) -> str:
     if not text: return ""
@@ -45,14 +45,14 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
                 words.append({"word": m.surface(), "pos": ",".join(pos_info[0:4])})
     return words
 
-# --- 各ワーカープロセスで実行される本体 (内容は変更なし) ---
+# --- 各ワーカープロセスで実行される本体 ---
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int):
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
 
     url_id, url = queue_item['id'], queue_item['url']
-    # print(f"[*] ワーカー (PID: {os.getpid()}) が処理開始: {url}") # ログが多すぎる場合はコメントアウト
+    # print(f"[*] ワーカー (PID: {os.getpid()}) が処理開始: {url}")
     supabase: Client = create_client(supabase_url, supabase_key)
 
     try:
@@ -73,12 +73,19 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
             supabase.table("crawl_queue").update({"status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
             return True
         
+        # print(f"  [+] 新規または更新されたHTMLコンテンツを解析します。")
         text = get_text_from_html(response.content)
         
         if text:
             new_words = analyze_with_sudachi(text, _WORKER_TOKENIZER)
             filtered_words = [w for w in new_words if w["word"] not in stop_words_set]
+            
             if filtered_words:
+                # ▼▼▼▼▼ この1行を追加 ▼▼▼▼▼
+                # 新しい単語を登録する前に、このURLに関する古い出現記録をすべて削除
+                supabase.table("word_occurrences").delete().eq("source_url", url).execute()
+                # ▲▲▲▲▲ ▲▲▲▲▲ ▲▲▲▲▲
+
                 for word_data in filtered_words:
                     upsert_res = supabase.table("unique_words").upsert(
                         {"word": word_data["word"], "pos": word_data["pos"]},
@@ -102,16 +109,14 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
         }).eq("id", url_id).execute()
         return False
 
-# --- メイン処理 (レートリミット機能を追加) ---
+# --- メイン処理 (内容は変更なし) ---
 def main():
-    """キューからURLを取得し、プロセスプールに処理を依頼する"""
     config = configparser.ConfigParser()
     config.read('config.ini')
     
     max_workers = config.getint('Processor', 'MAX_WORKERS')
     process_batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
-    # レートリミット設定を読み込む
     target_accesses_per_minute = config.getint('RateLimit', 'TARGET_ACCESSES_PER_MINUTE')
 
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
@@ -127,16 +132,12 @@ def main():
     total_processed_count = 0
     
     while True:
-        # バッチ処理の開始時刻を記録
         batch_start_time = time.time()
-
         response = supabase_main.table("crawl_queue").select("id, url").in_("status", ["queued", "failed"]).limit(process_batch_size).execute()
         urls_to_process = response.data
-        
         if not urls_to_process:
             print("[*] 処理対象のURLがキューにありません。終了します。")
             break
-
         processing_ids = [item['id'] for item in urls_to_process]
         supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
         print(f"[*] {len(urls_to_process)}件のURLを処理対象としてロックしました。")
@@ -150,20 +151,14 @@ def main():
         total_processed_count += batch_count
         print(f"  [+] 1バッチ処理完了 (成功: {success_count}, 失敗: {batch_count - success_count})")
         
-        # ▼▼▼▼▼ レートリミットのロジック ▼▼▼▼▼
         batch_end_time = time.time()
         elapsed_time = batch_end_time - batch_start_time
-        
-        # このバッチ処理が本来かけるべき時間
         if target_accesses_per_minute > 0:
             required_time = (60.0 / target_accesses_per_minute) * batch_count
-            
-            # 処理が早すぎた場合、残りの時間だけ待機
             if elapsed_time < required_time:
                 wait_time = required_time - elapsed_time
                 print(f"  [*] レートリミットのため {wait_time:.2f} 秒待機します。")
                 time.sleep(wait_time)
-        # ▲▲▲▲▲ ここまで ▲▲▲▲▲
     
     print(f"\n--- コンテンツ解析処理終了 ---")
     print(f"今回処理した合計URL数: {total_processed_count}")
