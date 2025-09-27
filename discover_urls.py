@@ -16,6 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 def get_content_hash(content: bytes) -> str:
+    """コンテンツのSHA256ハッシュ値を計算する"""
     return hashlib.sha256(content).hexdigest()
 
 def intelligent_worker(url_item: dict, supabase_client, config, session):
@@ -45,16 +46,17 @@ def intelligent_worker(url_item: dict, supabase_client, config, session):
         if "html" in content_type:
             new_hash = get_content_hash(response.content)
 
+            # ▼▼▼ 'NoneType'エラー対策の修正 ▼▼▼
             db_res = supabase_client.table("crawl_queue").select("content_hash").eq("url", url).maybe_single().execute()
+            if db_res is None or not hasattr(db_res, 'data'):
+                print(f"  [!] DB応答が不正(worker): {url}")
+                return url, None, set() # 応答がない場合は何もしない
+            # ▲▲▲ ここまで修正 ▲▲▲
+            
             old_hash = db_res.data.get("content_hash") if db_res.data else None
 
             if old_hash != new_hash:
-                update_payload = {
-                    "url": url,
-                    "status": "queued",
-                    "content_hash": new_hash,
-                    "last_modified": new_last_modified
-                }
+                update_payload = { "url": url, "status": "queued", "content_hash": new_hash, "last_modified": new_last_modified }
 
             soup = BeautifulSoup(response.content, 'html.parser')
             for a_tag in soup.find_all('a', href=True):
@@ -68,6 +70,21 @@ def intelligent_worker(url_item: dict, supabase_client, config, session):
         print(f"  [!] 不明なエラー: {url} - {e}")
     
     return url, update_payload, found_links
+
+def parse_sitemap(sitemap_url: str, session) -> set:
+    """サイトマップXMLを解析し、URLのセットを返す"""
+    print(f"[*] サイトマップを解析中: {sitemap_url}")
+    try:
+        response = session.get(sitemap_url, timeout=30)
+        response.raise_for_status()
+        namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        root = ET.fromstring(response.content)
+        locs = [loc.text for loc in root.findall('ns:url/ns:loc', namespaces)]
+        print(f"  [+] サイトマップから {len(locs)} 件のURLを発見しました。")
+        return set(locs)
+    except Exception as e:
+        print(f"  [!] サイトマップの解析に失敗しました: {e}")
+        return set()
 
 def main():
     config = configparser.ConfigParser()
@@ -90,7 +107,7 @@ def main():
     print("[*] DBから既知のURLリストを取得しています...")
     try:
         response = supabase.table("crawl_queue").select("id, url, last_modified").execute()
-        all_known_urls = response.data
+        all_known_urls = response.data if response else []
         print(f"  [+] {len(all_known_urls)}件の既知URLを取得しました。")
     except Exception as e:
         print(f"  [!] 既知URLの取得に失敗: {e}")
@@ -101,8 +118,7 @@ def main():
     seed_urls = set(filter(None, index_pages))
     if sitemap_url:
         try:
-            sitemap_links = parse_sitemap(sitemap_url, session)
-            seed_urls.update(sitemap_links)
+            seed_urls.update(parse_sitemap(sitemap_url, session))
         except Exception as e:
             print(f"  [!] サイトマップ解析中にエラー: {e}")
 
@@ -128,56 +144,41 @@ def main():
             except Exception as exc:
                 print(f'[!] ワーカーで例外が発生しました: {exc}')
 
-    # 更新が必要なURLを一括でキューに追加
     if urls_to_update_queue:
         print(f"[*] {len(urls_to_update_queue)}件の更新されたURLをキューに追加します。")
         supabase.table("crawl_queue").upsert(urls_to_update_queue, on_conflict="url").execute()
 
-    # 全く新しいURLをチャンクに分けてキューに追加
     if newly_discovered_links:
         print(f"[*] 発見した {len(newly_discovered_links)} 件のリンクから、新規URLをチェックします...")
         
-        # ▼▼▼▼▼ ここからが修正箇所 ▼▼▼▼▼
-        # 全リンクをチャンクに分割
         all_links_list = list(newly_discovered_links)
-        chunk_size = 10 # 一度にDBに問い合わせるURL数
+        # ▼▼▼▼▼ チャンクサイズを小さくする修正 ▼▼▼▼▼
+        chunk_size = 100 # 一度にDBに問い合わせるURL数を減らす
+        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
         truly_new_urls = []
 
         for i in range(0, len(all_links_list), chunk_size):
             chunk = all_links_list[i:i + chunk_size]
             
-            # DBに既に存在するURLをチャンクごとに問い合わせ
-            response = supabase.table("crawl_queue").select("url").in_("url", chunk).execute()
-            existing_urls_in_chunk = {item['url'] for item in response.data}
-            
-            # チャンク内で新規のものだけをリストに追加
-            truly_new_urls.extend([url for url in chunk if url not in existing_urls_in_chunk])
+            try:
+                response = supabase.table("crawl_queue").select("url").in_("url", chunk).execute()
+                existing_urls_in_chunk = {item['url'] for item in response.data}
+                truly_new_urls.extend([url for url in chunk if url not in existing_urls_in_chunk])
+            except Exception as db_e:
+                print(f"  [!] 新規URLの存在チェック中にDBエラー: {db_e}")
 
         if truly_new_urls:
             print(f"[*] {len(truly_new_urls)}件の全く新しいURLをキューに追加します。")
-            # 新規URLもチャンクに分けてDBに登録
             for i in range(0, len(truly_new_urls), chunk_size):
                 chunk = truly_new_urls[i:i + chunk_size]
                 supabase.table("crawl_queue").upsert(
                     [{"url": link, "status": "queued"} for link in chunk], 
                     on_conflict="url"
                 ).execute()
-        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
         else:
             print("[*] 全く新しいURLは見つかりませんでした。")
 
     print(f"\n--- 差分クロール終了 ---")
-
-# (parse_sitemap関数は前回のままで変更なし)
-def parse_sitemap(sitemap_url: str, session) -> set:
-    print(f"[*] サイトマップを解析中: {sitemap_url}")
-    response = session.get(sitemap_url, timeout=30)
-    response.raise_for_status()
-    namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-    root = ET.fromstring(response.content)
-    locs = [loc.text for loc in root.findall('ns:url/ns:loc', namespaces)]
-    print(f"  [+] サイトマップから {len(locs)} 件のURLを発見しました。")
-    return set(locs)
 
 if __name__ == "__main__":
     main()
