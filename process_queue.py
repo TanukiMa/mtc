@@ -17,7 +17,7 @@ _WORKER_TOKENIZER = None
 
 # --- テキスト抽出・解析関連の関数群 (内容は変更なし) ---
 def get_content_hash(content: bytes) -> str:
-    return hashlib.sha2sha256(content).hexdigest()
+    return hashlib.sha256(content).hexdigest()
 
 def clean_text(text: str) -> str:
     if not text: return ""
