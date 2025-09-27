@@ -12,10 +12,8 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from sudachipy import tokenizer, dictionary
 
-# --- Sudachi Tokenizerのためのグローバル変数 ---
 _WORKER_TOKENIZER = None
 
-# --- テキスト抽出・解析関連の関数群 (内容は変更なし) ---
 def get_content_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -32,27 +30,36 @@ def get_text_from_html(content: bytes) -> str:
     except Exception as e:
         raise RuntimeError(f"HTML解析エラー: {e}")
 
+# ▼▼▼▼▼ チャンク分割ロジックを再導入 ▼▼▼▼▼
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
+    """sudachipyを使い、未知の普通名詞を抽出する。長文は分割して処理する。"""
     if not text.strip() or not tokenizer_obj: return []
-    chunk_size = 40000
+    
+    chunk_size = 40000  # sudachipyのバイト制限より安全に小さい値
     words = []
-    for i in range(0, len(text), chunk_size):
-        chunk = text[i:i + chunk_size]
-        morphemes = tokenizer_obj.tokenize(chunk)
-        for m in morphemes:
-            pos_info = m.part_of_speech()
-            if m.is_oov() and pos_info[0] == "名詞" and pos_info[1] == "普通名詞" and len(m.surface()) > 1:
-                words.append({"word": m.surface(), "pos": ",".join(pos_info[0:4])})
-    return words
 
-# --- 各ワーカープロセスで実行される本体 ---
+    try:
+        # テキストをチャンクに分割してループ処理
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i + chunk_size]
+            morphemes = tokenizer_obj.tokenize(chunk)
+            
+            for m in morphemes:
+                pos_info = m.part_of_speech()
+                if m.is_oov() and pos_info[0] == "名詞" and pos_info[1] == "普通名詞" and len(m.surface()) > 1:
+                    words.append({"word": m.surface(), "pos": ",".join(pos_info[0:4])})
+    except Exception as e:
+        print(f"  [!] Sudachi解析エラー: {e}")
+
+    return words
+# ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int):
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
 
     url_id, url = queue_item['id'], queue_item['url']
-    # print(f"[*] ワーカー (PID: {os.getpid()}) が処理開始: {url}")
     supabase: Client = create_client(supabase_url, supabase_key)
 
     try:
@@ -73,7 +80,6 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
             supabase.table("crawl_queue").update({"status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
             return True
         
-        # print(f"  [+] 新規または更新されたHTMLコンテンツを解析します。")
         text = get_text_from_html(response.content)
         
         if text:
@@ -81,10 +87,9 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
             filtered_words = [w for w in new_words if w["word"] not in stop_words_set]
             
             if filtered_words:
-                # ▼▼▼▼▼ この1行を追加 ▼▼▼▼▼
-                # 新しい単語を登録する前に、このURLに関する古い出現記録をすべて削除
+                # ▼▼▼▼▼ 古い出現記録を削除するロジックを再導入 ▼▼▼▼▼
                 supabase.table("word_occurrences").delete().eq("source_url", url).execute()
-                # ▲▲▲▲▲ ▲▲▲▲▲ ▲▲▲▲▲
+                # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
                 for word_data in filtered_words:
                     upsert_res = supabase.table("unique_words").upsert(
@@ -109,11 +114,9 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
         }).eq("id", url_id).execute()
         return False
 
-# --- メイン処理 (内容は変更なし) ---
 def main():
     config = configparser.ConfigParser()
     config.read('config.ini')
-    
     max_workers = config.getint('Processor', 'MAX_WORKERS')
     process_batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
@@ -123,7 +126,7 @@ def main():
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
 
     supabase_main = create_client(supabase_url, supabase_key)
-    print("--- コンテンツ解析処理開始 (レートリミットモード) ---")
+    print("--- コンテンツ解析処理開始 (一括処理・レートリミットモード) ---")
 
     response = supabase_main.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
@@ -140,7 +143,7 @@ def main():
             break
         processing_ids = [item['id'] for item in urls_to_process]
         supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
-        print(f"[*] {len(urls_to_process)}件のURLを処理対象としてロックしました。")
+        print(f"[*] {len(urls_to_process)}件のURLをロックしました。")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set, request_timeout) for item in urls_to_process]
@@ -151,8 +154,7 @@ def main():
         total_processed_count += batch_count
         print(f"  [+] 1バッチ処理完了 (成功: {success_count}, 失敗: {batch_count - success_count})")
         
-        batch_end_time = time.time()
-        elapsed_time = batch_end_time - batch_start_time
+        elapsed_time = time.time() - batch_start_time
         if target_accesses_per_minute > 0:
             required_time = (60.0 / target_accesses_per_minute) * batch_count
             if elapsed_time < required_time:
