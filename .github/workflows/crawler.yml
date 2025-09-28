@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 350
     strategy:
       matrix:
-        instance: [1]
+        instance: [1,2]
     steps:
       - name: 1. Checkout repository
         uses: actions/checkout@v4
