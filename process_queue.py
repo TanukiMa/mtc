@@ -163,7 +163,6 @@ def main():
     print("--- コンテンツ解析処理開始 (一括処理・レートリミットモード) ---")
 
     pos_cache_for_workers = load_pos_master_to_cache(supabase_main)
-
     response = supabase_main.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
     print(f"[*] {len(stop_words_set)}件の除外ワードを読み込みました。")
@@ -177,9 +176,18 @@ def main():
         if not urls_to_process:
             print("[*] 処理対象のURLがキューにありません。終了します。")
             break
+        
         processing_ids = [item['id'] for item in urls_to_process]
-        supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", processing_ids).execute()
-        print(f"[*] {len(urls_to_process)}件のURLをロックしました。")
+        
+        chunk_size = 100 # 一度に更新するIDの数
+        print(f"[*] {len(processing_ids)}件のURLを処理対象としてロックします...")
+        try:
+            for i in range(0, len(processing_ids), chunk_size):
+                chunk = processing_ids[i:i + chunk_size]
+                supabase_main.table("crawl_queue").update({"status": "processing"}).in_("id", chunk).execute()
+        except Exception as e:
+            print(f"  [!] URLのロック中にDBエラーが発生しました: {e}", file=sys.stderr)
+            continue # このバッチはスキップして次のループへ
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set, request_timeout, sudachi_config_path, pos_cache_for_workers) for item in urls_to_process]
@@ -200,6 +208,5 @@ def main():
     
     print(f"\n--- コンテンツ解析処理終了 ---")
     print(f"今回処理した合計URL数: {total_processed_count}")
-
 if __name__ == "__main__":
     main()
