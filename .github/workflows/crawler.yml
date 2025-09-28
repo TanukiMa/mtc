@@ -76,5 +76,5 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          SUDACHI_CONFIG_PATH: ${{ env.CONFIG_PATH }} # Note: CONFIG_PATH was from a previous version, should be USER_DICT_PATH
+          USER_DICT_PATH: ${{ env.USER_DICT_PATH }}
         run: python process_queue.py
