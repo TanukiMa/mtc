@@ -1,5 +1,5 @@
 # .github/workflows/crawler.yml
-name: New Word Crawler Pipeline (Sequential Build)
+name: New Word Crawler Pipeline (Correct Initialization)
 
 on:
   schedule:
@@ -50,7 +50,7 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python build_dict_source.py
-      
+        
       - name: 4a. Display Generated Dictionary Source for Debugging
         if: always()
         run: |
@@ -58,23 +58,39 @@ jobs:
           head -n 10 user_dict_source.csv || echo "user_dict_source.csv not found or is empty."
           echo "----------------------------------------------------------"
         
-      - name: 5. Compile User Dictionary Binary
+      - name: 5. Compile User Dictionary and Prepare Config
         run: |
+          # 5-1. Pythonでシステム辞書のフルパスを取得 (system.dicが正しい名前)
           SYSTEM_DICT_PATH=$(python -c "import sudachidict_full, os; print(os.path.join(os.path.dirname(sudachidict_full.__file__), 'resources', 'system.dic'))")
-          echo "Found system dictionary at: ${SYSTEM_DICT_PATH}"
-
+          
+          # 5-2. ユーザー辞書ソースが存在する場合のみビルド
+          USER_DICT_PATH_VAR=""
           if [ -s user_dict_source.csv ]; then
             echo "CSV source found. Compiling user dictionary..."
             sudachipy ubuild -s "${SYSTEM_DICT_PATH}" -o user.dict user_dict_source.csv
-            echo "USER_DICT_PATH=user.dict" >> $GITHUB_ENV
-          else
-            echo "User dictionary source is empty. Skipping build."
-            echo "USER_DICT_PATH=" >> $GITHUB_ENV
+            USER_DICT_PATH_VAR="user.dict"
           fi
+
+          # 5-3. Sudachiの設定ファイル(sudachi.json)を動的に生成
+          echo "Generating sudachi.json..."
+          if [ -n "${USER_DICT_PATH_VAR}" ]; then
+            # ユーザー辞書がある場合
+            JSON_CONFIG="{\"systemDict\":\"${SYSTEM_DICT_PATH}\",\"userDict\":[\"${USER_DICT_PATH_VAR}\"]}"
+          else
+            # ユーザー辞書がない場合
+            JSON_CONFIG="{\"systemDict\":\"${SYSTEM_DICT_PATH}\"}"
+          fi
+          echo ${JSON_CONFIG} > sudachi.json
+          echo "Generated sudachi.json:"
+          cat sudachi.json
+
+          # 5-4. 設定ファイルのパスを次のステップに渡す
+          echo "SUDACHI_CONFIG_PATH=sudachi.json" >> $GITHUB_ENV
 
       - name: 6. Run Queue Processor
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          USER_DICT_PATH: ${{ env.USER_DICT_PATH }}
+          # Sudachiの設定ファイルパスを環境変数で渡す
+          SUDACHI_CONFIG_PATH: ${{ env.SUDACHI_CONFIG_PATH }}
         run: python process_queue.py
