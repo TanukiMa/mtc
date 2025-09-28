@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: 3. Install dependencies
-        run: pip install requests beautifulsoup4 supabase configparser
+        run: pip install requests beautifulsoup4 supabase configparser url-normalize
       - name: 4. Run URL Discoverer
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
