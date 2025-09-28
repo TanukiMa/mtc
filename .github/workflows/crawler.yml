@@ -40,14 +40,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      # ▼▼▼▼▼ このステップを修正 ▼▼▼▼▼
       - name: 3. Install all dependencies
         run: |
-          # sudachi-tools は不要なので削除
+          # SudachiDict-full をpipでインストール
           pip install sudachipy SudachiDict-full
           pip install requests beautifulsoup4 supabase configparser
-      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
       
       - name: 4. Build User Dictionary Source from Supabase
         env:
@@ -55,16 +52,23 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python build_dict_source.py
         
+      # ▼▼▼▼▼ このステップを修正 ▼▼▼▼▼
       - name: 5. Compile User Dictionary Binary
         run: |
+          # ステップ5-1: pipでインストールされたsystem_full.dicのフルパスをPythonを使って取得
+          SYSTEM_DICT_PATH=$(python -c "import sudachidict_full, os; print(os.path.join(os.path.dirname(sudachidict_full.__file__), 'resources', 'system_full.dic'))")
+          echo "Found system dictionary at: ${SYSTEM_DICT_PATH}"
+
+          # ステップ5-2: 取得したパスを-sオプションでubuildに渡す
           if [ -s user_dict_source.csv ]; then
             echo "CSV source found. Compiling user dictionary..."
-            sudachipy ubuild -o user.dict user_dict_source.csv
+            sudachipy ubuild -s "${SYSTEM_DICT_PATH}" -o user.dict user_dict_source.csv
             echo "USER_DICT_PATH=user.dict" >> $GITHUB_ENV
           else
             echo "User dictionary source is empty. Skipping build."
             echo "USER_DICT_PATH=" >> $GITHUB_ENV
           fi
+      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
       - name: 6. Run Queue Processor
         env:
