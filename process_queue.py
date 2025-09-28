@@ -38,7 +38,7 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
     """sudachipyを使い、未知の普通名詞を抽出する"""
     if not text.strip() or not tokenizer_obj: return []
     
-    chunk_size = 40000
+    chunk_size = 10000
     words = []
 
     try:
