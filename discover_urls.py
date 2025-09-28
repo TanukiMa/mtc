@@ -17,7 +17,6 @@ def fetch_links_from_url(url: str, config, session) -> set:
     request_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     found_links = set()
     
-    print(f"[*] インデックスページを検証中: {url}")
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = session.get(url, timeout=request_timeout, headers=headers, allow_redirects=True)
@@ -35,9 +34,9 @@ def fetch_links_from_url(url: str, config, session) -> set:
                     if urlparse(normalized_link).netloc == target_domain:
                         found_links.add(normalized_link)
                 except Exception:
-                    # 不正なURLは無視
                     pass
     except Exception as e:
+        # ログが多すぎる場合はこの行をコメントアウト
         print(f"  [!] エラー: {url} - {e}", file=sys.stderr)
     
     return found_links
@@ -48,40 +47,54 @@ def main():
     
     index_pages = list(filter(None, config.get('Seeds', 'INDEX_PAGES').strip().split('\n')))
     max_workers = config.getint('Discoverer', 'MAX_DISCOVER_WORKERS')
+    crawl_depth = config.getint('Discoverer', 'CRAWL_DEPTH')
 
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
     supabase = create_client(supabase_url, supabase_key)
     
-    print("--- 「浅いクロール」によるURL発見処理開始 ---")
+    print(f"--- 「多階層クロール(深さ: {crawl_depth})」によるURL発見処理開始 ---")
 
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     session.mount('http://', HTTPAdapter(max_retries=retries))
 
+    # --- 階層的クロールのメインロジック ---
     all_discovered_links = set()
-    
-    # インデックスページ群を並列処理
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(fetch_links_from_url, url, config, session): url for url in index_pages}
+    visited_urls = set()
+    # 最初の階層(depth 0)はインデックスページ
+    urls_for_next_level = set(url_normalize(url) for url in index_pages)
+
+    for depth in range(crawl_depth):
+        current_level_urls = urls_for_next_level - visited_urls
+        if not current_level_urls:
+            print(f"[*] 深さ {depth}: 新しい探索対象URLがないため終了します。")
+            break
+
+        print(f"\n[*] 深さ {depth + 1}/{crawl_depth}: {len(current_level_urls)}件のURLを検証します...")
         
-        for future in as_completed(future_to_url):
-            try:
-                # 各インデックスページから見つかったリンクをすべて集約
-                all_discovered_links.update(future.result())
-            except Exception as exc:
-                print(f'[!] ワーカーで例外が発生しました: {exc}', file=sys.stderr)
+        visited_urls.update(current_level_urls)
+        all_discovered_links.update(current_level_urls)
+        urls_for_next_level.clear()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {executor.submit(fetch_links_from_url, url, config, session): url for url in current_level_urls}
+            
+            for future in as_completed(future_to_url):
+                try:
+                    # 次の階層で探索するURLを収集
+                    urls_for_next_level.update(future.result())
+                except Exception as exc:
+                    print(f'[!] ワーカーで例外が発生しました: {exc}', file=sys.stderr)
 
     if not all_discovered_links:
         print("[*] 解析対象のURLは発見されませんでした。")
         return
 
-    print(f"[*] {len(all_discovered_links)}件のURLを発見しました。キューに追加します...")
+    print(f"\n[*] 合計 {len(all_discovered_links)}件のユニークなURLを発見しました。キューに追加します...")
     
-    # 発見したURLをDBに一括登録 (ステータスは'queued'、ハッシュ値はまだ不明なのでnull)
     try:
-        # チャンクに分割してupsert
         chunk_size = 500
         links_list = list(all_discovered_links)
         for i in range(0, len(links_list), chunk_size):
