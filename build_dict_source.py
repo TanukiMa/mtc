@@ -23,6 +23,7 @@ def main():
         for table in dictionary_tables:
             print(f"  [*] テーブル '{table}' からデータを取得中...")
             try:
+                # pos_masterテーブルをJOINして、品詞文字列を取得
                 response = supabase.from_(table).select(
                     "surface, sudachi_reading, reading, pos_master(pos1, pos2, pos3, pos4, pos5, pos6)"
                 ).execute()
@@ -32,7 +33,6 @@ def main():
                     continue
                 
                 for item in response.data:
-                    # ▼▼▼▼▼ 完全版(18列)フォーマットのCSV行を生成 ▼▼▼▼▼
                     surface = item['surface']
                     sudachi_reading = item['sudachi_reading']
                     reading = item['reading']
@@ -42,14 +42,12 @@ def main():
                         pos_data.get(f'pos{i}', '*') for i in range(1, 7)
                     ]
                     
-                    # 18列の各要素を定義
-                    # 1,2: 連接ID(空で自動計算), 3: コスト(-1で自動計算)
-                    # 12: 正規化表記(表層形と同じ), 13-17: 未使用(*)
+                    # 完全版(18列)フォーマットのCSV行を生成
                     columns = [
                         surface,           # 0: 見出し (TRIE 用)
-                        '',                # 1: 左連接ID
-                        '',                # 2: 右連接ID
-                        '-1',              # 3: コスト
+                        '0',               # 1: 左連接ID (安全なデフォルト値)
+                        '0',               # 2: 右連接ID (安全なデフォルト値)
+                        '-1',              # 3: コスト (自動計算)
                         sudachi_reading,   # 4: 見出し (表示用)
                         *pos_parts,        # 5-10: 品詞 (6要素)
                         reading,           # 11: 読み
@@ -63,7 +61,6 @@ def main():
                     
                     line = ",".join(columns) + "\n"
                     f_out.write(line)
-                    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
                 
                 print(f"    [+] {len(response.data)}件の単語を追加しました。")
                 total_words += len(response.data)

@@ -1,22 +1,26 @@
 # .github/workflows/crawler.yml
-name: New Word Crawler Pipeline (Correct Dictionary Path)
+name: New Word Crawler Pipeline (Sequential Build)
 
 on:
   schedule:
+    # 6時間ごとに実行 (0時, 6時, 12時, 18時 UTC)
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
   discover:
-    # ... (discoverジョブは変更なし) ...
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
-      - run: pip install requests beautifulsoup4 supabase configparser
-      - name: Run URL Discoverer
+      - name: 1. Checkout repository
+        uses: actions/checkout@v4
+      - name: 2. Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: 3. Install dependencies
+        run: pip install requests beautifulsoup4 supabase configparser
+      - name: 4. Run URL Discoverer
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -36,63 +40,41 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: 3. Install dependencies
+      - name: 3. Install all dependencies
         run: |
           pip install sudachipy SudachiDict-full
           pip install requests beautifulsoup4 supabase configparser
       
-      - name: 4. Build User Dictionary Source
+      - name: 4. Build User Dictionary Source from Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python build_dict_source.py
-        
-      # ▼▼▼▼▼ このステップを全面的に修正 ▼▼▼▼▼
-      - name: 5. Compile User Dictionary and Prepare Config
+      
+      - name: 4a. Display Generated Dictionary Source for Debugging
+        if: always()
         run: |
-          # 5-1. Pythonでsudachidict_fullパッケージの場所を特定
-          SUDANO_DIC_ROOT=$(python -c "import sudachidict_full, os; print(os.path.dirname(sudachidict_full.__file__))")
-          echo "SudachiDict-full installed at: ${SUDANO_DIC_ROOT}"
-          
-          # 5-2. (デバッグ用) インストールされたファイル構造を確認
-          echo "--- Installed dictionary files ---"
-          ls -R "${SUDANO_DIC_ROOT}"
-          echo "------------------------------------"
+          echo "--- Contents of user_dict_source.csv (first 10 lines) ---"
+          head -n 10 user_dict_source.csv || echo "user_dict_source.csv not found or is empty."
+          echo "----------------------------------------------------------"
+        
+      - name: 5. Compile User Dictionary Binary
+        run: |
+          SYSTEM_DICT_PATH=$(python -c "import sudachidict_full, os; print(os.path.join(os.path.dirname(sudachidict_full.__file__), 'resources', 'system.dic'))")
+          echo "Found system dictionary at: ${SYSTEM_DICT_PATH}"
 
-          # 5-3. 正しいシステム辞書のパスを変数に設定 (system.dicが正しい名前)
-          SYSTEM_DICT_PATH="${SUDANO_DIC_ROOT}/resources/system.dic"
-          
-          # 5-4. ユーザー辞書ソースが存在する場合のみビルド
           if [ -s user_dict_source.csv ]; then
             echo "CSV source found. Compiling user dictionary..."
             sudachipy ubuild -s "${SYSTEM_DICT_PATH}" -o user.dict user_dict_source.csv
-            USER_DICT_PATH_VAR="user.dict"
+            echo "USER_DICT_PATH=user.dict" >> $GITHUB_ENV
           else
             echo "User dictionary source is empty. Skipping build."
-            USER_DICT_PATH_VAR=""
+            echo "USER_DICT_PATH=" >> $GITHUB_ENV
           fi
-
-          # 5-5. Sudachiの設定ファイル(sudachi.json)を動的に生成
-          echo "Generating sudachi.json..."
-          if [ -n "${USER_DICT_PATH_VAR}" ]; then
-            # ユーザー辞書がある場合
-            JSON_CONFIG="{\"systemDict\":\"${SYSTEM_DICT_PATH}\",\"userDict\":[\"${USER_DICT_PATH_VAR}\"]}"
-          else
-            # ユーザー辞書がない場合
-            JSON_CONFIG="{\"systemDict\":\"${SYSTEM_DICT_PATH}\"}"
-          fi
-          echo ${JSON_CONFIG} > sudachi.json
-          echo "Generated sudachi.json:"
-          cat sudachi.json
-
-          # 5-6. 設定ファイルのパスを次のステップに渡す
-          echo "CONFIG_PATH=sudachi.json" >> $GITHUB_ENV
-      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
       - name: 6. Run Queue Processor
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          # Sudachiの設定ファイルパスを環境変数で渡す
-          SUDACHI_CONFIG_PATH: ${{ env.CONFIG_PATH }}
+          SUDACHI_CONFIG_PATH: ${{ env.CONFIG_PATH }} # Note: CONFIG_PATH was from a previous version, should be USER_DICT_PATH
         run: python process_queue.py
