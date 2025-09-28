@@ -48,9 +48,7 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
             
             for m in morphemes:
                 pos_info = m.part_of_speech()
-                # (品詞1, 品詞2, ...) のタプルを作成
                 pos_tuple = tuple(pos_info)
-                # グローバルキャッシュから品詞IDを逆引き
                 pos_id = _POS_CACHE.get(pos_tuple)
 
                 if m.is_oov() and pos_info[0] == "名詞" and pos_info[1] == "普通名詞" and len(m.surface()) > 1:
@@ -62,13 +60,13 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
     return words
 
 # --- 各ワーカープロセスで実行される本体 ---
-def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int, user_dict_path: str, pos_cache: dict):
+def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int, config_path: str, pos_cache: dict):
     """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER, _POS_CACHE
     if _WORKER_TOKENIZER is None:
         # このワーカープロセスで各種オブジェクトを一度だけ初期化
-        dict_path = user_dict_path if user_dict_path else None
-        _WORKER_TOKENIZER = dictionary.Dictionary(dict="full", user_dict=dict_path).create(mode=tokenizer.Tokenizer.SplitMode.C)
+        print(f"[*] ワーカー (PID: {os.getpid()}) でSudachi Tokenizerを初期化します (config: {config_path})。")
+        _WORKER_TOKENIZER = dictionary.Dictionary(config_path=config_path).create(mode=tokenizer.Tokenizer.SplitMode.C)
         _POS_CACHE = pos_cache
 
     url_id, url = queue_item['id'], queue_item['url']
@@ -149,11 +147,11 @@ def main():
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
     
-    # Workflowから渡されたユーザー辞書のパスを取得
-    user_dict_path = os.environ.get("USER_DICT_PATH")
+    # Workflowから渡されたSudachi設定ファイルのパスを取得
+    sudachi_config_path = os.environ.get("SUDACHI_CONFIG_PATH")
 
     supabase_main = create_client(supabase_url, supabase_key)
-    print("--- コンテンツ解析処理開始 (一括処理・レートリミットモード) ---")
+    print("--- コンテンツ解析処理開始 ---")
 
     # 最初に品詞マスターをメモリにキャッシュ
     pos_cache_for_workers = load_pos_master_to_cache(supabase_main)
@@ -176,7 +174,7 @@ def main():
         print(f"[*] {len(urls_to_process)}件のURLをロックしました。")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set, request_timeout, user_dict_path, pos_cache_for_workers) for item in urls_to_process]
+            futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, stop_words_set, request_timeout, sudachi_config_path, pos_cache_for_workers) for item in urls_to_process]
             results = [f.result() for f in futures]
         
         success_count = sum(1 for r in results if r)
