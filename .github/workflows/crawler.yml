@@ -40,8 +40,8 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          pip install sudachipy SudachiDict-full
-          pip install requests beautifulsoup4 supabase
+          pip install sudachipy SudachiDict-full sudachi-tools
+          pip install requests beautifulsoup4 supabase configparser
       - name: Run Queue Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
