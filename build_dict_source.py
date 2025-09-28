@@ -1,6 +1,7 @@
 # build_dict_source.py
 import os
 import configparser
+import csv # csvモジュールをインポート
 from supabase import create_client, Client
 
 def main():
@@ -19,11 +20,13 @@ def main():
     print(f"[*] ユーザー辞書ソースを '{output_filename}' に生成します...")
     
     total_words = 0
-    with open(output_filename, 'w', encoding='utf-8') as f_out:
+    # ▼▼▼▼▼ csv.writer を使って正しくCSVを生成するように修正 ▼▼▼▼▼
+    with open(output_filename, 'w', encoding='utf-8', newline='') as f_out:
+        writer = csv.writer(f_out)
+        
         for table in dictionary_tables:
             print(f"  [*] テーブル '{table}' からデータを取得中...")
             try:
-                # pos_masterテーブルをJOINして、品詞文字列を取得
                 response = supabase.from_(table).select(
                     "surface, sudachi_reading, reading, pos_master(pos1, pos2, pos3, pos4, pos5, pos6)"
                 ).execute()
@@ -37,16 +40,25 @@ def main():
                     if not pos_data: continue
                     
                     pos_parts = [
-                        pos_data.get(f'pos{i}', '*') for i in range(1, 7)
+                        pos_data.get(f'pos{i}') for i in range(1, 7)
                     ]
-                    pos_string = ",".join(p if p is not None else '*' for p in pos_parts)
-                    line = f"{item['surface']},{item['sudachi_reading']},{item['reading']},{pos_string}\n"
-                    f_out.write(line)
+                    # Noneや空の要素を'*'に置き換え、余分な'*'を末尾から削除
+                    pos_string = ",".join(p if p else '*' for p in pos_parts).rstrip(',*')
+
+                    # 4つの要素を持つリストを作成して書き込む
+                    row = [
+                        item['surface'],
+                        item['sudachi_reading'],
+                        item['reading'],
+                        pos_string
+                    ]
+                    writer.writerow(row)
                 
                 print(f"    [+] {len(response.data)}件の単語を追加しました。")
                 total_words += len(response.data)
             except Exception as e:
                 print(f"    [!!!] テーブル '{table}' の処理中にエラー: {e}")
+    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
     print(f"\n[+] 合計 {total_words} 件の単語をCSVに出力しました。")
 
