@@ -13,11 +13,9 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from sudachipy import tokenizer, dictionary
 
-# --- 各ワーカープロセスで一度だけ初期化されるグローバル変数 ---
 _WORKER_TOKENIZER = None
 _POS_CACHE = {}
 
-# --- ヘルパー関数 ---
 def get_content_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
@@ -35,7 +33,6 @@ def get_text_from_html(content: bytes) -> str:
         raise RuntimeError(f"HTML解析エラー: {e}")
 
 def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
-    """sudachipyを使い、未知の普通名詞を抽出する"""
     if not text.strip() or not tokenizer_obj: return []
     
     chunk_size = 10000
@@ -59,13 +56,9 @@ def analyze_with_sudachi(text: str, tokenizer_obj) -> list:
 
     return words
 
-# --- 各ワーカープロセスで実行される本体 ---
 def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, stop_words_set: set, request_timeout: int, config_path: str, pos_cache: dict):
-    """単一のHTML URLをダウンロード・解析・保存するワーカー関数"""
     global _WORKER_TOKENIZER, _POS_CACHE
     if _WORKER_TOKENIZER is None:
-        # このワーカープロセスで各種オブジェクトを一度だけ初期化
-        print(f"[*] ワーカー (PID: {os.getpid()}) でSudachi Tokenizerを初期化します (config: {config_path})。")
         _WORKER_TOKENIZER = dictionary.Dictionary(config_path=config_path).create(mode=tokenizer.Tokenizer.SplitMode.C)
         _POS_CACHE = pos_cache
 
@@ -113,20 +106,38 @@ def worker_process_url(queue_item: dict, supabase_url: str, supabase_key: str, s
         }).eq("id", url_id).execute()
         return True
 
+    except requests.exceptions.HTTPError as http_err:
+        status_code = http_err.response.status_code
+        print(f"  [!] HTTPエラー発生: {url} - Status: {status_code}", file=sys.stderr)
+        
+        if 400 <= status_code < 500:
+            supabase.table("crawl_queue").update({
+                "status": "completed",
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "error_message": f"HTTP Error {status_code}"
+            }).eq("id", url_id).execute()
+        else:
+            supabase.table("crawl_queue").update({
+                "status": "failed",
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "error_message": f"HTTP Error {status_code}"
+            }).eq("id", url_id).execute()
+        return False
+
     except Exception as e:
-        print(f"  [!] エラー発生: {url} - {e}", file=sys.stderr)
+        print(f"  [!] 不明なエラー発生: {url} - {e}", file=sys.stderr)
         supabase.table("crawl_queue").update({
-            "status": "failed", "processed_at": datetime.now(timezone.utc).isoformat(), "error_message": str(e)
+            "status": "failed",
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "error_message": str(e)
         }).eq("id", url_id).execute()
         return False
 
 def load_pos_master_to_cache(supabase_client: Client) -> dict:
-    """DBからpos_masterを読み込み、高速検索用のキャッシュを作成する"""
     pos_cache = {}
     print("[*] 品詞マスターデータをDBから読み込んでいます...")
     try:
         response = supabase_client.table("pos_master").select("id,pos1,pos2,pos3,pos4,pos5,pos6").execute()
-        # (pos1, pos2, ...) のタプルをキー、IDを値とする辞書を作成
         for item in response.data:
             key = tuple(item.get(f'pos{i}', '*') for i in range(1, 7))
             pos_cache[key] = item['id']
@@ -135,7 +146,6 @@ def load_pos_master_to_cache(supabase_client: Client) -> dict:
         print(f"  [!] 品詞マスターの読み込みに失敗: {e}", file=sys.stderr)
     return pos_cache
 
-# --- メイン処理 ---
 def main():
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -147,13 +157,11 @@ def main():
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     if not supabase_url or not supabase_key: raise ValueError("環境変数を設定してください。")
     
-    # Workflowから渡されたSudachi設定ファイルのパスを取得
     sudachi_config_path = os.environ.get("SUDACHI_CONFIG_PATH")
 
     supabase_main = create_client(supabase_url, supabase_key)
-    print("--- コンテンツ解析処理開始 ---")
+    print("--- コンテンツ解析処理開始 (一括処理・レートリミットモード) ---")
 
-    # 最初に品詞マスターをメモリにキャッシュ
     pos_cache_for_workers = load_pos_master_to_cache(supabase_main)
 
     response = supabase_main.table("stop_words").select("word").execute()
