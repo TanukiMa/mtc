@@ -73,7 +73,7 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
     text_id = text_item['id']
     crawl_queue_id = text_item['crawl_queue']['id']
     source_url = text_item['crawl_queue']['url']
-    text_to_analyze = text_item['extracted_text']
+    text_to_analyze = text_item['sentence_text']
     
     supabase: Client = create_client(supabase_url, supabase_key)
 
@@ -127,7 +127,7 @@ def main():
     while True:
         # Fetch a batch of texts that have not been processed by GiNZA.
         # The nested select gets the original URL.
-        res = supabase.table("sentence_queue").select("id, extracted_text, crawl_queue(id, url)").eq("ginza_status", "queued").limit(batch_size).execute()
+        res = supabase.table("sentence_queue").select("id, sentence_text, crawl_queue(id, url)").eq("ginza_status", "queued").limit(batch_size).execute()
         
         if not res.data: 
             print("[*] No texts in queue for GiNZA to process. Exiting.")
