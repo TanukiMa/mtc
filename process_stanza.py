@@ -1,5 +1,11 @@
 # process_stanza.py
-import os, sys, re, time, configparser, requests, hashlib
+import os
+import sys
+import re
+import time
+import configparser
+import requests
+import hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
@@ -10,16 +16,20 @@ import stanza
 _NLP_MODEL = None
 
 # --- Helper Functions ---
-def get_content_hash(content: bytes) -> str: return hashlib.sha256(content).hexdigest()
+def get_content_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
 def clean_text(text: str) -> str:
     if not text: return ""
     return re.sub(r'\s+', ' ', text).strip()
+
 def get_text_from_html(content: bytes) -> str:
     try:
         soup = BeautifulSoup(content, 'html.parser')
         for s in soup(['script', 'style']): s.decompose()
         return clean_text(' '.join(soup.stripped_strings))
-    except Exception as e: raise RuntimeError(f"HTML parsing error: {e}")
+    except Exception as e:
+        raise RuntimeError(f"HTML parsing error: {e}")
 
 def analyze_with_stanza(text: str) -> list:
     global _NLP_MODEL
@@ -32,12 +42,10 @@ def analyze_with_stanza(text: str) -> list:
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
             
-            # 1. 固有表現を抽出
             for ent in doc.ents:
                 if len(ent.text) > 1:
                     found_words.append({"word": ent.text.strip(), "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
 
-            # 2. 未知の名詞を抽出 (StanzaはOOV判定機能がないため、PoSタグで代用)
             for sentence in doc.sentences:
                 for word in sentence.words:
                     if word.upos == "NOUN" and len(word.text) > 1:
@@ -50,15 +58,12 @@ def analyze_with_stanza(text: str) -> list:
 def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, request_delay, debug_mode):
     global _NLP_MODEL
     if _NLP_MODEL is None:
-        print(f"[*] Worker (PID: {os.getpid()}) downloading and loading Stanza model 'ja'...")
-        # モデルをダウンロードしてからロード
-        stanza.download('ja', verbose=False)
-        _NLP_MODEL = stanza.Pipeline('ja', verbose=False)
+        print(f"[*] Worker (PID: {os.getpid()}) loading pre-downloaded Stanza model 'ja'...")
+        _NLP_MODEL = stanza.Pipeline('ja', verbose=False, use_gpu=False)
 
     url_id, url = queue_item['id'], queue_item['url']
     supabase: Client = create_client(supabase_url, supabase_key)
     
-    # (try-exceptブロックはginza_process.pyとほぼ同じロジック)
     try:
         time.sleep(request_delay)
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -71,7 +76,6 @@ def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, 
             return True
         
         new_hash = get_content_hash(response.content)
-        # (差分検知のロジックは簡潔化のため省略)
         
         text = get_text_from_html(response.content)
         if text:
@@ -88,17 +92,17 @@ def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, 
         supabase.table("crawl_queue").update({"status": "completed", "content_hash": new_hash, "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
         return True
     except Exception as e:
+        print(f"  [!] エラー発生: {url} - {e}", file=sys.stderr)
         supabase.table("crawl_queue").update({"status": "failed", "error_message": str(e)}).eq("id", url_id).execute()
         return False
 
 def main():
-    # (main関数はginza_process.pyとほぼ同じロジック)
     config = configparser.ConfigParser(); config.read('config.ini')
     max_workers = config.getint('Processor', 'MAX_WORKERS')
     batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
     req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     req_delay = config.getfloat('RateLimit', 'REQUEST_DELAY_SECONDS')
-    debug_mode = config.getboolean('Debug', 'PROCESSOR_DEBUG')
+    debug_mode = config.getboolean('Debug', 'PROCESSOR_DEBUG', fallback=False)
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
@@ -106,14 +110,22 @@ def main():
 
     while True:
         res = supabase.table("crawl_queue").select("id, url").eq("status", "queued").limit(batch_size).execute()
-        if not res.data: break
+        if not res.data:
+            print("[*] 処理対象のURLがキューにありません。終了します。")
+            break
         
         ids = [item['id'] for item in res.data]
         supabase.table("crawl_queue").update({"status": "processing"}).in_("id", ids).execute()
+        print(f"[*] {len(res.data)}件のURLをロックしました。")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, req_timeout, req_delay, debug_mode) for item in res.data]
-            [f.result() for f in futures]
+            results = [f.result() for f in futures]
+            
+            success_count = sum(1 for r in results if r)
+            fail_count = len(results) - success_count
+            print(f"  [+] 1バッチ処理完了 (成功: {success_count}, 失敗: {fail_count})")
+
     print("--- Stanza Content Processor Finished ---")
 
 if __name__ == "__main__":

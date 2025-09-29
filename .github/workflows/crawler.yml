@@ -2,13 +2,13 @@
 name: MHLW term seek with GiNZA and Stanza NLP Pipeline
 
 on:
-#  schedule:
-#    - cron: '0 */6 * * *'
+  # schedule:
+  #   - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
   discover:
-    runs-on: ubuntu-24.04-arm # URL発見はx86でも問題ないため、より一般的なランナーを使用
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,10 +50,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
+      
       - name: Install Stanza and dependencies
         run: |
-          pip install stanza==1.8.0
+          pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0
+          pip install -U stanza
           pip install requests beautifulsoup4 supabase configparser
+
+      - name: Pre-download Stanza model
+        run: |
+          python -c "import stanza; stanza.download('ja', verbose=False)"
+
       - name: Run Stanza Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
