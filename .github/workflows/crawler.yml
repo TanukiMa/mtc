@@ -37,10 +37,16 @@ jobs:
         run: |
           pip install -U ginza ja_ginza_electra
           pip install requests beautifulsoup4 supabase configparser
+      - name: Pre-download Hugging Face model and set cache path
+        id: download_model
+        run: |
+          huggingface-cli download megagonlabs/transformers-ud-japanese-electra-base-ginza-510 --local-dir ./ginza_model
+          echo "model_path=$(pwd)/ginza_model" >> $GITHUB_OUTPUT
       - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GINZA_MODEL_PATH: ${{ steps.download_model.outputs.model_path }}
         run: python process_ginza.py
 
   process_stanza:
