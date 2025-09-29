@@ -2,34 +2,33 @@
 name: MHLW term seek with GiNZA and Stanza NLP Pipeline
 
 on:
-  # schedule:
-  #   - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
-  clear_database:
+  discover:
+    # `clear_database`ジョブは不要になったため、依存関係(needs)は削除
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
-      - name: Install dependencies
+
+      # ▼▼▼▼▼ このステップを修正・統合 ▼▼▼▼▼
+      - name: Install dependencies for Discoverer
         run: |
-          # psycopg2-binaryを追加
-          pip install supabase configparser psycopg2-binary
-      - name: Clear Database Tables
+          # clear_db.pyで必要なpsycopg2-binaryを追加
+          pip install requests beautifulsoup4 supabase configparser url-normalize psycopg2-binary
+      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+
+      # ▼▼▼▼▼ このステップを新規追加 ▼▼▼▼▼
+      # 実運用時には、以下の "Clear Database Tables" ステップをコメントアウトするだけで良い
+      - name: Clear Database Tables (for debugging)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python clear_db.py
+      # ▲▲▲▲▲ ここまで追加 ▲▲▲▲▲
 
-  discover:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
-      - run: pip install requests beautifulsoup4 supabase configparser url-normalize
       - name: Run URL Discoverer
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -37,53 +36,46 @@ jobs:
         run: python discover_urls.py
 
   process_ginza:
+    # 依存先を discover に設定
     needs: discover
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
-        instance: [1]
+        instance: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
+      # ... (以降のprocess_ginzaジョブに変更はありません) ...
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
       - name: Install GiNZA and dependencies
         run: |
-          pip install spacy ginza ja_ginza_electra huggingface-hub
+          pip install -U ginza ja_ginza_electra
           pip install requests beautifulsoup4 supabase configparser
-      - name: Pre-download Hugging Face model
-        env:
-          HF_HUB_DISABLE_TELEMETRY: 1
-        run: |
-          huggingface-cli download megagonlabs/transformers-ud-japanese-electra-base-ginza-510
-          echo "TRANSFORMERS_CACHE=/home/runner/.cache/huggingface/hub" >> $GITHUB_ENV
       - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          TRANSFORMERS_CACHE: ${{ env.TRANSFORMERS_CACHE }}
         run: python process_ginza.py
 
   process_stanza:
+    # 依存先を discover に設定
     needs: discover
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
-        instance: [1]
+        instance: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
+      # ... (以降のprocess_stanzaジョブに変更はありません) ...
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
-      
       - name: Install Stanza and dependencies
         run: |
-          pip install "numpy<2.0" stanza requests beautifulsoup4 supabase configparser
-
+          pip install "numpy<2.0" stanza
+          pip install requests beautifulsoup4 supabase configparser
       - name: Pre-download Stanza model
         run: |
           python -c "import stanza; stanza.download('ja', verbose=False)"
-
       - name: Run Stanza Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
