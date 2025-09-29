@@ -1,38 +1,61 @@
 # .github/workflows/crawler.yml
-name: MHLW term seek with GiNZA and Stanza NLP Pipeline
+name: 3-Stage NLP Pipeline
 
 on:
   workflow_dispatch:
 
 jobs:
+  # Stage 1: Discover URLs
   discover:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
-
-      - name: Install dependencies for Discoverer
-        run: |
-          pip install requests beautifulsoup4 supabase configparser url-normalize
-
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 supabase configparser url-normalize
       - name: Run URL Discoverer
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python discover_urls.py
 
-  process_ginza:
+  # Stage 2: Preprocess and Extract Text
+  preprocess:
     needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4 supabase configparser
+      - name: Run Text Extractor
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python preprocess.py
+
+  # Stage 3a: Process with GiNZA
+  process_ginza:
+    needs: preprocess
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
         instance: [1]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
       - name: Install GiNZA and dependencies
         run: |
           pip install -U ginza ja_ginza_electra
@@ -43,17 +66,20 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python process_ginza.py
 
+  # Stage 3b: Process with Stanza
   process_stanza:
-    needs: discover
+    needs: preprocess
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
         instance: [1]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
       - name: Install Stanza and dependencies
         run: |
           pip install "numpy<2.0" stanza
