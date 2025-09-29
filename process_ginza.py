@@ -35,7 +35,7 @@ def analyze_with_ginza(text: str) -> list:
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
     
-    chunk_size = 40000
+    chunk_size = 10000
     found_words = []
     found_texts = set()
 
