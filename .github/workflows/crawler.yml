@@ -7,6 +7,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  clear_database:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: Install dependencies
+        run: |
+          # psycopg2-binaryを追加
+          pip install supabase configparser psycopg2-binary
+      - name: Clear Database Tables
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python clear_db.py
+
   discover:
     runs-on: ubuntu-24.04-arm
     steps:
