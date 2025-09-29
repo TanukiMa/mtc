@@ -1,56 +1,45 @@
 # process_stanza.py
-import os
-import sys
-import re
-import time
-import configparser
-import requests
-import hashlib
+import os, sys, re, time, configparser, requests, hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import stanza
 
-# --- Globals for worker processes ---
 _NLP_MODEL = None
 
-# --- Helper Functions ---
-def get_content_hash(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
+def get_content_hash(content: bytes) -> str: return hashlib.sha256(content).hexdigest()
 def clean_text(text: str) -> str:
     if not text: return ""
     return re.sub(r'\s+', ' ', text).strip()
-
 def get_text_from_html(content: bytes) -> str:
     try:
         soup = BeautifulSoup(content, 'html.parser')
         for s in soup(['script', 'style']): s.decompose()
         return clean_text(' '.join(soup.stripped_strings))
-    except Exception as e:
-        raise RuntimeError(f"HTML parsing error: {e}")
+    except Exception as e: raise RuntimeError(f"HTML parsing error: {e}")
 
 def analyze_with_stanza(text: str) -> list:
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
-    
     chunk_size = 50000 
     found_words = []
+    found_texts = set()
     try:
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
-            
             for ent in doc.ents:
-                if len(ent.text) > 1:
-                    found_words.append({"word": ent.text.strip(), "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
-
+                word_text = ent.text.strip()
+                if len(word_text) > 1 and word_text not in found_texts:
+                    found_words.append({"word": word_text, "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
+                    found_texts.add(word_text)
             for sentence in doc.sentences:
                 for word in sentence.words:
-                    if word.upos == "NOUN" and len(word.text) > 1:
-                        found_words.append({"word": word.text.strip(), "source_tool": "stanza", "entity_category": None, "pos_tag": word.xpos})
-
+                    word_text = word.text.strip()
+                    if word.upos == "NOUN" and len(word_text) > 1 and word_text not in found_texts:
+                        found_words.append({"word": word_text, "source_tool": "stanza", "entity_category": None, "pos_tag": word.xpos})
+                        found_texts.add(word_text)
     except Exception as e:
         print(f"  [!] Stanza analysis error: {e}", file=sys.stderr)
     return found_words
@@ -81,13 +70,30 @@ def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, 
         if text:
             new_words = analyze_with_stanza(text)
             if new_words:
-                supabase.table("word_occurrences").delete().eq("source_url", url).execute()
-                unique_new_words = {item['word']: item for item in new_words}.values()
-                for word_data in unique_new_words:
-                    upsert_res = supabase.table("unique_words").upsert(word_data, on_conflict="word, source_tool").execute()
-                    if upsert_res.data:
-                        word_id = upsert_res.data[0]['id']
-                        supabase.table("word_occurrences").insert({"word_id": word_id, "source_url": url}).execute()
+                # ▼▼▼▼▼ データベース処理をより堅牢な方法に変更 ▼▼▼▼▼
+                # 1. 発見した単語をunique_wordsに一括UPSERT
+                words_to_upsert = list({item['word']: item for item in new_words}.values())
+                upsert_res = supabase.table("unique_words").upsert(
+                    words_to_upsert, 
+                    on_conflict="word, source_tool"
+                ).execute()
+
+                # 2. 処理した単語のIDを取得するため、あらためてDBに問い合わせる
+                word_texts = [w['word'] for w in words_to_upsert]
+                select_res = supabase.table("unique_words").select("id, word").in_("word", word_texts).eq("source_tool", "stanza").execute()
+                
+                word_to_id_map = {item['word']: item['id'] for item in select_res.data}
+
+                # 3. 古い出現記録を削除し、新しい記録を登録
+                if word_to_id_map:
+                    supabase.table("word_occurrences").delete().eq("source_url", url).execute()
+                    
+                    occurrences_to_insert = [
+                        {"word_id": word_id, "source_url": url}
+                        for word, word_id in word_to_id_map.items()
+                    ]
+                    supabase.table("word_occurrences").insert(occurrences_to_insert).execute()
+                # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
         supabase.table("crawl_queue").update({"status": "completed", "content_hash": new_hash, "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
         return True
