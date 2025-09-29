@@ -15,7 +15,11 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside"]):
             s.decompose()
         
-        raw_blocks = [re.sub(r'\s+', ' ', element.get_text(strip=True)) for element in soup.find_all(['p', 'h1', 'h2', 'h3', 'li', 'td', 'th', 'div'])]
+        # ▼▼▼▼▼ 抽出対象のタグリストに 'div' を追加 ▼▼▼▼▼
+        target_tags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div']
+        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+
+        raw_blocks = [re.sub(r'\s+', ' ', element.get_text(strip=True)) for element in soup.find_all(target_tags)]
 
         for block in filter(None, raw_blocks):
             if len(block.encode('utf-8')) > safe_byte_limit:
@@ -29,10 +33,7 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         raise RuntimeError(f"HTML parsing error: {e}")
 
 def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeout, safe_byte_limit, char_chunk_size):
-    url_id, url, old_hash = queue_item['id'], queue_item['url'], queue_item.get('content_hash')
-    old_last_modified = queue_item.get('last_modified')
-    old_etag = queue_item.get('etag')
-
+    url_id, url, old_hash, old_last_modified, old_etag = queue_item['id'], queue_item['url'], queue_item.get('content_hash'), queue_item.get('last_modified'), queue_item.get('etag')
     supabase = create_client(supabase_url, supabase_key)
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -82,14 +83,12 @@ def main():
     max_workers = config.getint('Processor', 'MAX_WORKERS')
     batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
     req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
-    # ▼▼▼▼▼ 新しい設定値を読み込む ▼▼▼▼▼
     safe_byte_limit = config.getint('Preprocessor', 'SAFE_BYTE_LIMIT')
     char_chunk_size = config.getint('Preprocessor', 'CHAR_CHUNK_SIZE')
-    # ▲▲▲▲▲ ここまで追加 ▲▲▲▲▲
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (with Configurable Chunking) ---")
+    print("--- Text Extraction Process Started (with <div> tag included) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
@@ -102,11 +101,10 @@ def main():
         print(f"[*] Locked {len(res.data)} URLs for extraction.")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # ▼▼▼▼▼ ワーカーに新しい設定値を渡す ▼▼▼▼▼
             futures = [executor.submit(worker_preprocess_url, item, supabase_url, supabase_key, req_timeout, safe_byte_limit, char_chunk_size) for item in res.data]
-            [f.result() for f in futures]
-        
-        print(f"  [+] Batch complete ({len(res.data)} URLs processed).")
+            results = [f.result() for f in futures]
+            success_count = sum(1 for r in results if r)
+            print(f"  [+] Batch complete (Success: {success_count}, Fail: {len(results) - success_count})")
     
     print("--- Text Extraction Process Finished ---")
 
