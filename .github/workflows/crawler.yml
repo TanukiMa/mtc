@@ -32,12 +32,19 @@ jobs:
         with: { python-version: '3.10' }
       - name: Install GiNZA and dependencies
         run: |
-          pip install spacy ginza ja_ginza_electra
+          pip install spacy ginza ja_ginza_electra huggingface-hub
           pip install requests beautifulsoup4 supabase configparser
+      - name: Pre-download Hugging Face model
+        env:
+          HF_HUB_DISABLE_TELEMETRY: 1
+        run: |
+          huggingface-cli download megagonlabs/transformers-ud-japanese-electra-base-ginza-510
+          echo "TRANSFORMERS_CACHE=/home/runner/.cache/huggingface/hub" >> $GITHUB_ENV
       - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TRANSFORMERS_CACHE: ${{ env.TRANSFORMERS_CACHE }}
         run: python process_ginza.py
 
   process_stanza:
@@ -53,7 +60,7 @@ jobs:
       
       - name: Install Stanza and dependencies
         run: |
-          pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0
+          pip install "numpy<2.0"
           pip install -U stanza
           pip install requests beautifulsoup4 supabase configparser
 
