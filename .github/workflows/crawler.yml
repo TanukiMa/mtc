@@ -6,28 +6,22 @@ on:
 
 jobs:
   discover:
-    # `clear_database`ジョブは不要になったため、依存関係(needs)は削除
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
 
-      # ▼▼▼▼▼ このステップを修正・統合 ▼▼▼▼▼
       - name: Install dependencies for Discoverer
         run: |
           # clear_db.pyで必要なpsycopg2-binaryを追加
           pip install requests beautifulsoup4 supabase configparser url-normalize psycopg2-binary
-      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
-      # ▼▼▼▼▼ このステップを新規追加 ▼▼▼▼▼
-      # 実運用時には、以下の "Clear Database Tables" ステップをコメントアウトするだけで良い
       - name: Clear Database Tables (for debugging)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python clear_db.py
-      # ▲▲▲▲▲ ここまで追加 ▲▲▲▲▲
 
       - name: Run URL Discoverer
         env:
@@ -36,14 +30,13 @@ jobs:
         run: python discover_urls.py
 
   process_ginza:
-    # 依存先を discover に設定
     needs: discover
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-        instance: [1, 2, 3, 4, 5, 6, 7, 8]
+#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
+        instance: [1]
     steps:
-      # ... (以降のprocess_ginzaジョブに変更はありません) ...
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
@@ -58,14 +51,13 @@ jobs:
         run: python process_ginza.py
 
   process_stanza:
-    # 依存先を discover に設定
     needs: discover
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
-        instance: [1, 2, 3, 4, 5, 6, 7, 8]
+#        instance: [1, 2, 3, 4, 5, 6, 7, 8]
+        instance: [1]
     steps:
-      # ... (以降のprocess_stanzaジョブに変更はありません) ...
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: '3.10' }
