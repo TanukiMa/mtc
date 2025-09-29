@@ -60,9 +60,7 @@ jobs:
       
       - name: Install Stanza and dependencies
         run: |
-          pip install "numpy<2.0"
-          pip install -U stanza
-          pip install requests beautifulsoup4 supabase configparser
+          pip install "numpy<2.0" stanza requests beautifulsoup4 supabase configparser
 
       - name: Pre-download Stanza model
         run: |
