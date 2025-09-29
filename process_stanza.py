@@ -103,12 +103,12 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                         if occurrences:
                             supabase.table("word_occurrences").insert(occurrences).execute()
         
-        supabase.table("processed_texts").update({"stanza_status": "completed"}).eq("id", text_id).execute()
+        supabase.table("sentence_queue").update({"stanza_status": "completed"}).eq("id", text_id).execute()
         return True
 
     except Exception as e:
         print(f"  [!] Stanza worker error on text ID {text_id}: {e}", file=sys.stderr)
-        supabase.table("processed_texts").update({"stanza_status": "failed"}).eq("id", text_id).execute()
+        supabase.table("sentence_queue").update({"stanza_status": "failed"}).eq("id", text_id).execute()
         return False
 
 # --- Main process orchestrator ---
@@ -127,14 +127,14 @@ def main():
     
     while True:
         # Fetch a batch of texts that have not been processed by Stanza.
-        res = supabase.table("processed_texts").select("id, extracted_text, crawl_queue(id, url)").eq("stanza_status", "queued").limit(batch_size).execute()
+        res = supabase.table("sentence_queue").select("id, extracted_text, crawl_queue(id, url)").eq("stanza_status", "queued").limit(batch_size).execute()
         
         if not res.data: 
             print("[*] No texts in queue for Stanza to process. Exiting.")
             break
         
         ids = [item['id'] for item in res.data]
-        supabase.table("processed_texts").update({"stanza_status": "processing"}).in_("id", ids).execute()
+        supabase.table("sentence_queue").update({"stanza_status": "processing"}).in_("id", ids).execute()
         print(f"[*] Locked {len(res.data)} texts for Stanza processing.")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
