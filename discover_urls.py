@@ -3,6 +3,8 @@ import os
 import sys
 import requests
 import configparser
+import time
+import random
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
@@ -36,7 +38,6 @@ def fetch_links_from_url(url: str, config, session) -> set:
                 except Exception:
                     pass
     except Exception as e:
-        # ログが多すぎる場合はこの行をコメントアウト
         print(f"  [!] エラー: {url} - {e}", file=sys.stderr)
     
     return found_links
@@ -45,6 +46,7 @@ def main():
     config = configparser.ConfigParser()
     config.read('config.ini')
     
+    # config.iniから設定を読み込む
     index_pages = list(filter(None, config.get('Seeds', 'INDEX_PAGES').strip().split('\n')))
     max_workers = config.getint('Discoverer', 'MAX_DISCOVER_WORKERS')
     crawl_depth = config.getint('Discoverer', 'CRAWL_DEPTH')
@@ -58,7 +60,6 @@ def main():
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
-    session.mount('http://', HTTPAdapter(max_retries=retries))
 
     # --- 階層的クロールのメインロジック ---
     all_discovered_links = set()
@@ -69,7 +70,7 @@ def main():
     for depth in range(crawl_depth):
         current_level_urls = urls_for_next_level - visited_urls
         if not current_level_urls:
-            print(f"[*] 深さ {depth}: 新しい探索対象URLがないため終了します。")
+            print(f"[*] 深さ {depth + 1}: 新しい探索対象URLがないため終了します。")
             break
 
         print(f"\n[*] 深さ {depth + 1}/{crawl_depth}: {len(current_level_urls)}件のURLを検証します...")
