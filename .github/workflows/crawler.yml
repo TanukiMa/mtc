@@ -14,14 +14,7 @@ jobs:
 
       - name: Install dependencies for Discoverer
         run: |
-          # clear_db.pyで必要なpsycopg2-binaryを追加
-          pip install requests beautifulsoup4 supabase configparser url-normalize psycopg2-binary
-
-      - name: Clear Database Tables (for debugging)
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python clear_db.py
+          pip install requests beautifulsoup4 supabase configparser url-normalize
 
       - name: Run URL Discoverer
         env:
