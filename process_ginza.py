@@ -1,11 +1,5 @@
 # process_ginza.py
-import os
-import sys
-import re
-import time
-import configparser
-import requests
-import hashlib
+import os, sys, re, time, configparser, requests, hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
@@ -35,7 +29,7 @@ def analyze_with_ginza(text: str) -> list:
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
     
-    chunk_size = 10000
+    chunk_size = 40000 
     found_words = []
     found_texts = set()
 
@@ -44,29 +38,19 @@ def analyze_with_ginza(text: str) -> list:
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
             
-            # 1. Extract Named Entities
+            # 1. Extract Named Entities (excluding DATE)
             for ent in doc.ents:
                 if ent.label_ != 'DATE':
-                word_text = ent.text.strip()
-                if len(word_text) > 1 and word_text not in found_texts:
-                    found_words.append({
-                        "word": word_text,
-                        "source_tool": "ginza",
-                        "entity_category": ent.label_,
-                        "pos_tag": "ENT"
-                    })
-                    found_texts.add(word_text)
+                    word_text = ent.text.strip()
+                    if len(word_text) > 1 and word_text not in found_texts:
+                        found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": ent.label_, "pos_tag": "ENT"})
+                        found_texts.add(word_text)
 
             # 2. Extract other Nouns
             for token in doc:
                 word_text = token.text.strip()
                 if token.pos_ == "NOUN" and len(word_text) > 1 and word_text not in found_texts:
-                     found_words.append({
-                         "word": word_text,
-                         "source_tool": "ginza",
-                         "entity_category": "NOUN_GENERAL",
-                         "pos_tag": token.tag_
-                     })
+                     found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": "NOUN_GENERAL", "pos_tag": token.tag_})
                      found_texts.add(word_text)
 
     except Exception as e:
@@ -94,6 +78,12 @@ def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, 
             return True
         
         new_hash = get_content_hash(response.content)
+        db_res = supabase.table("crawl_queue").select("content_hash").eq("id", url_id).single().execute()
+        old_hash = db_res.data.get("content_hash") if db_res.data else None
+        
+        if old_hash == new_hash:
+            supabase.table("crawl_queue").update({"status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
+            return True
         
         text = get_text_from_html(response.content)
         if text:
@@ -101,24 +91,28 @@ def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, 
             if new_words:
                 supabase.table("word_occurrences").delete().eq("source_url", url).execute()
                 
-                for word_data in new_words:
-                    upsert_res = supabase.table("unique_words").upsert(
-                        {
-                            "word": word_data["word"],
-                            "source_tool": word_data["source_tool"],
-                            "entity_category": word_data["entity_category"],
-                            "pos_tag": word_data["pos_tag"]
-                        }, 
-                        on_conflict="word, source_tool"
-                    ).execute()
+                unique_new_words = {item['word']: item for item in new_words}.values()
+                
+                for word_data in unique_new_words:
+                    upsert_res = supabase.table("unique_words").upsert(word_data, on_conflict="word, source_tool").execute()
                     if upsert_res.data:
                         word_id = upsert_res.data[0]['id']
                         supabase.table("word_occurrences").insert({"word_id": word_id, "source_url": url}).execute()
 
         supabase.table("crawl_queue").update({"status": "completed", "content_hash": new_hash, "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
         return True
+    except requests.exceptions.HTTPError as http_err:
+        status_code = http_err.response.status_code
+        print(f"  [!] HTTP Error: {url} - Status: {status_code}", file=sys.stderr)
+        update_payload = {"processed_at": datetime.now(timezone.utc).isoformat(), "error_message": f"HTTP Error {status_code}"}
+        if 400 <= status_code < 500:
+            update_payload["status"] = "completed"
+        else:
+            update_payload["status"] = "failed"
+        supabase.table("crawl_queue").update(update_payload).eq("id", url_id).execute()
+        return False
     except Exception as e:
-        print(f"  [!] エラー発生: {url} - {e}", file=sys.stderr)
+        print(f"  [!] Unknown Error: {url} - {e}", file=sys.stderr)
         supabase.table("crawl_queue").update({"status": "failed", "error_message": str(e)}).eq("id", url_id).execute()
         return False
 
@@ -137,18 +131,18 @@ def main():
     while True:
         res = supabase.table("crawl_queue").select("id, url").eq("status", "queued").limit(batch_size).execute()
         if not res.data: 
-            print("[*] 処理対象のURLがキューにありません。終了します。")
+            print("[*] No URLs in queue to process. Exiting.")
             break
         
         ids = [item['id'] for item in res.data]
         supabase.table("crawl_queue").update({"status": "processing"}).in_("id", ids).execute()
-        print(f"[*] {len(res.data)}件のURLをロックしました。")
+        print(f"[*] Locked {len(res.data)} URLs for processing.")
 
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_process_url, item, supabase_url, supabase_key, req_timeout, req_delay, debug_mode) for item in res.data]
             results = [f.result() for f in futures]
             success_count = sum(1 for r in results if r)
-            print(f"  [+] 1バッチ処理完了 (成功: {success_count}, 失敗: {len(results) - success_count})")
+            print(f"  [+] Batch complete (Success: {success_count}, Fail: {len(results) - success_count})")
             
     print("--- GiNZA Content Processor Finished ---")
 
