@@ -46,6 +46,7 @@ def analyze_with_ginza(text: str) -> list:
             
             # 1. Extract Named Entities
             for ent in doc.ents:
+                if ent.label_ != 'DATE':
                 word_text = ent.text.strip()
                 if len(word_text) > 1 and word_text not in found_texts:
                     found_words.append({

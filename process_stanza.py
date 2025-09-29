@@ -30,6 +30,7 @@ def analyze_with_stanza(text: str) -> list:
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
             for ent in doc.ents:
+                if ent.label_ != 'DATE':
                 word_text = ent.text.strip()
                 if len(word_text) > 1 and word_text not in found_texts:
                     found_words.append({"word": word_text, "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
