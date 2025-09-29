@@ -47,7 +47,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GINZA_MODEL_PATH: ${{ steps.download_model.outputs.model_path }}
+          GINZA_MODEL_PATH: ${{ steps.find_model.outputs.model_path }}
         run: python process_ginza.py
 
   process_stanza:
