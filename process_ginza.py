@@ -47,10 +47,8 @@ def analyze_with_ginza(text: str) -> list:
 def worker_process_url(queue_item, supabase_url, supabase_key, request_timeout, request_delay, debug_mode, ginza_model_path: str):
     global _NLP_MODEL
     if _NLP_MODEL is None:
-        # ▼▼▼▼▼ 環境変数で渡された固定パスからモデルをロードする ▼▼▼▼▼
-        print(f"[*] Worker (PID: {os.getpid()}) loading GiNZA model from path: {ginza_model_path}")
-        _NLP_MODEL = spacy.load(ginza_model_path)
-        # ▲▲▲▲▲ ここまで変更 ▲▲▲▲▲
+        print(f"[*] Worker (PID: {os.getpid()}) loading GiNZA model 'ja_ginza_electra'...")
+        _NLP_MODEL = spacy.load("ja_ginza_electra")
 
     url_id, url = queue_item['id'], queue_item['url']
     supabase: Client = create_client(supabase_url, supabase_key)

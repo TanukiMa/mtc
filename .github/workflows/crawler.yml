@@ -37,17 +37,10 @@ jobs:
         run: |
           pip install -U ginza ja_ginza_electra
           pip install requests beautifulsoup4 supabase configparser
-      - name: Find Installed GiNZA Model Path
-        id: find_model
-        run: |
-          MODEL_PATH=$(python -c "import ja_ginza_electra, os; print(os.path.dirname(ja_ginza_electra.__file__))")
-          echo "Found GiNZA model at: ${MODEL_PATH}"
-          echo "model_path=${MODEL_PATH}" >> $GITHUB_OUTPUT
       - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GINZA_MODEL_PATH: ${{ steps.find_model.outputs.model_path }}
         run: python process_ginza.py
 
   process_stanza:
