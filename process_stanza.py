@@ -4,34 +4,28 @@ from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from supabase import create_client, Client
 import stanza
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="torch._weights_only_unpickler")
 
 _NLP_MODEL = None
 
 def analyze_with_stanza(text: str) -> list:
-    """Uses Stanza to extract named entities and other nouns from a given text."""
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
-    
     chunk_size = 50000 
-    found_words = []
-    found_texts = set()
+    found_words, found_texts = [], set()
     try:
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
-            
-            # Create a set of date entity texts to ignore them in the second pass
             date_texts = {ent.text.strip() for ent in doc.ents if ent.type == 'DATE'}
-            
-            # 1. Extract Named Entities (excluding DATE)
             for ent in doc.ents:
                 if ent.type != 'DATE':
                     word_text = ent.text.strip()
                     if len(word_text) > 1 and word_text not in found_texts:
                         found_words.append({"word": word_text, "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
                         found_texts.add(word_text)
-
-            # 2. Extract other Nouns
             for sentence in doc.sentences:
                 for word in sentence.words:
                     word_text = word.text.strip()
@@ -43,7 +37,6 @@ def analyze_with_stanza(text: str) -> list:
     return found_words
 
 def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
-    """Analyzes a single text item, finds new words, and saves them to the database."""
     global _NLP_MODEL
     if _NLP_MODEL is None:
         _NLP_MODEL = stanza.Pipeline('ja', verbose=False, use_gpu=False)
@@ -53,10 +46,8 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
     try:
         url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
         source_url = url_res.data['url'] if url_res.data else f"unknown_url_for_crawl_id_{crawl_queue_id}"
-        
         new_words = analyze_with_stanza(text_to_analyze)
         if new_words:
-            # Filter against stop words and sanitize data before DB insertion
             sanitized_words = []
             for word_data in new_words:
                 word_text = word_data["word"]
@@ -64,7 +55,6 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                     word_data['word'] = word_text.replace('\x00', '')
                     if word_data['word']:
                         sanitized_words.append(word_data)
-
             if sanitized_words:
                 upsert_res = supabase.table("unique_words").upsert(sanitized_words, on_conflict="word, source_tool").execute()
                 if upsert_res.data:
@@ -76,7 +66,6 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                         occurrences = [{"word_id": word_id, "source_url": source_url} for word, word_id in word_to_id_map.items() if word in word_to_id_map]
                         if occurrences:
                             supabase.table("word_occurrences").upsert(occurrences, on_conflict="word_id, source_url").execute()
-        
         supabase.table("sentence_queue").update({"stanza_status": "completed"}).eq("id", text_id).execute()
         return True
     except Exception as e:
@@ -85,10 +74,11 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
         return False
 
 def main():
-    """Main process orchestrator."""
     config = configparser.ConfigParser(); config.read('config.ini')
-    max_workers = config.getint('Processor', 'MAX_WORKERS')
-    batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
+    # ▼▼▼▼▼ [Stanza_Processor]から設定を読み込む ▼▼▼▼▼
+    max_workers = config.getint('Stanza_Processor', 'MAX_WORKERS')
+    batch_size = config.getint('Stanza_Processor', 'BATCH_SIZE')
+    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)

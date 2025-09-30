@@ -5,56 +5,46 @@ from concurrent.futures import ProcessPoolExecutor
 from supabase import create_client, Client
 import spacy
 import warnings
+
 warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
 
 _NLP_MODEL = None
 
 def analyze_with_ginza(text: str) -> list:
-    """Uses GiNZA to extract named entities and other nouns from a given text."""
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
-    
     chunk_size = 40000 
     found_words = []
     found_texts = set()
-
     try:
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
-            
-            # 1. Extract Named Entities (excluding DATE)
             for ent in doc.ents:
                 if ent.label_ != 'DATE':
                     word_text = ent.text.strip()
                     if len(word_text) > 1 and word_text not in found_texts:
                         found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": ent.label_, "pos_tag": "ENT"})
                         found_texts.add(word_text)
-
-            # 2. Extract other Nouns, ensuring they are not part of any entity
             for token in doc:
                 word_text = token.text.strip()
                 if token.pos_ == "NOUN" and token.ent_type_ == "" and len(word_text) > 1 and word_text not in found_texts:
                      found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": "NOUN_GENERAL", "pos_tag": token.tag_})
                      found_texts.add(word_text)
-
     except Exception as e:
         print(f"  [!] GiNZA analysis error: {e}", file=sys.stderr)
     return found_words
 
 def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
-    """Analyzes a single text item, finds new words, and saves them to the database."""
     global _NLP_MODEL
     if _NLP_MODEL is None:
         _NLP_MODEL = spacy.load("ja_ginza_electra")
 
     text_id, crawl_queue_id, text_to_analyze = text_item['id'], text_item['crawl_queue_id'], text_item['sentence_text']
     supabase = create_client(supabase_url, supabase_key)
-
     try:
         url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
         source_url = url_res.data['url'] if url_res.data else f"unknown_url_for_crawl_id_{crawl_queue_id}"
-
         new_words = analyze_with_ginza(text_to_analyze)
         if new_words:
             sanitized_words = []
@@ -64,7 +54,6 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                     word_data['word'] = word_text.replace('\x00', '')
                     if word_data['word']:
                         sanitized_words.append(word_data)
-            
             if sanitized_words:
                 upsert_res = supabase.table("unique_words").upsert(sanitized_words, on_conflict="word, source_tool").execute()
                 if upsert_res.data:
@@ -76,7 +65,6 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                         occurrences = [{"word_id": word_id, "source_url": source_url} for word, word_id in word_to_id_map.items() if word in word_to_id_map]
                         if occurrences:
                             supabase.table("word_occurrences").upsert(occurrences, on_conflict="word_id, source_url").execute()
-
         supabase.table("sentence_queue").update({"ginza_status": "completed"}).eq("id", text_id).execute()
         return True
     except Exception as e:
@@ -85,10 +73,11 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
         return False
 
 def main():
-    """Main process orchestrator."""
     config = configparser.ConfigParser(); config.read('config.ini')
-    max_workers = config.getint('Processor', 'MAX_WORKERS')
-    batch_size = config.getint('Processor', 'PROCESS_BATCH_SIZE')
+    # ▼▼▼▼▼ [GiNZA_Processor]から設定を読み込む ▼▼▼▼▼
+    max_workers = config.getint('GiNZA_Processor', 'MAX_WORKERS')
+    batch_size = config.getint('GiNZA_Processor', 'BATCH_SIZE')
+    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
