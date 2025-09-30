@@ -29,10 +29,10 @@ def analyze_with_ginza(text: str) -> list:
                         found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": ent.label_, "pos_tag": "ENT"})
                         found_texts.add(word_text)
 
-            # 2. Extract other Nouns, ensuring they are not part of a DATE entity
+            # 2. Extract other Nouns, ensuring they are not part of any entity
             for token in doc:
                 word_text = token.text.strip()
-                if token.pos_ == "NOUN" and token.ent_type_ != "DATE" and len(word_text) > 1 and word_text not in found_texts:
+                if token.pos_ == "NOUN" and token.ent_type_ == "" and len(word_text) > 1 and word_text not in found_texts:
                      found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": "NOUN_GENERAL", "pos_tag": token.tag_})
                      found_texts.add(word_text)
 
@@ -55,12 +55,10 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
 
         new_words = analyze_with_ginza(text_to_analyze)
         if new_words:
-            # Filter against stop words and sanitize data before DB insertion
             sanitized_words = []
             for word_data in new_words:
                 word_text = word_data["word"]
                 if word_text not in stop_words_set:
-                    # Sanitize by removing null characters
                     word_data['word'] = word_text.replace('\x00', '')
                     if word_data['word']:
                         sanitized_words.append(word_data)
