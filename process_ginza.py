@@ -53,7 +53,7 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
     if _NLP_MODEL is None:
         _NLP_MODEL = spacy.load("ja_ginza_electra")
 
-    text_id, crawl_queue_id, text_to_analyze = text_item['id'], text_item['crawl_queue_id'], text_item['extracted_text']
+    text_id, crawl_queue_id, text_to_analyze = text_item['id'], text_item['crawl_queue_id'], text_item['sentence_text']
     supabase = create_client(supabase_url, supabase_key)
     try:
         url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
@@ -96,7 +96,7 @@ def main():
         urls_to_process = None
         for attempt in range(max_retries):
             try:
-                res = supabase.table("sentence_queue").select("id, extracted_text, crawl_queue_id").eq("ginza_status", "queued").limit(batch_size).execute()
+                res = supabase.table("sentence_queue").select("id, sentence_text, crawl_queue_id").eq("ginza_status", "queued").limit(batch_size).execute()
                 urls_to_process = res.data
                 break
             except Exception as e:
