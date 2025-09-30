@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 supabase configparser
+        run: pip install requests beautifulsoup4 supabase configparser sudachipy SudachiDict-full
       - name: Run Text Extractor
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
