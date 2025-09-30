@@ -11,19 +11,45 @@ from sudachipy import tokenizer, dictionary
 _WORKER_TOKENIZER = None
 
 def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
+    """HTMLコンテンツから意味のある「文」を抽出し、バイト数制限を超えないように分割して返す"""
     final_sentences = []
     try:
         soup = BeautifulSoup(content, 'html.parser')
-        for s in soup(["script", "style", "header", "footer", "nav", "aside"]):
+        # 不要なセクションを丸ごと削除
+        for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
-        target_tags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div']
-        raw_blocks = [re.sub(r'\s+', ' ', element.get_text(strip=True)) for element in soup.find_all(target_tags)]
-        for block in filter(None, raw_blocks):
-            if len(block.encode('utf-8')) > safe_byte_limit:
-                for i in range(0, len(block), char_chunk_size):
-                    final_sentences.append(block[i:i + char_chunk_size])
+        
+        # 主要なコンテンツが含まれる可能性のあるエリアを探す
+        main_content = soup.find('main') or soup.find(role='main') or soup.body
+        if not main_content:
+            return []
+
+        # 全体のテキストを取得
+        full_text = main_content.get_text(separator=' ', strip=True)
+        # 不要な定型句などを削除
+        full_text = full_text.replace('ページの先頭へ戻る', '')
+        
+        # 句読点(。！？)と改行を区切り文字として、文章を分割
+        # re.splitは区切り文字もリストに含めるため、後で結合する
+        sentences = re.split(r'([。！？\n])', full_text)
+        
+        # 分割された文章と区切り文字を再結合
+        combined_sentences = ["".join(i).strip() for i in zip(sentences[0::2], sentences[1::2])]
+        # 最後の部分が残っていれば追加
+        if len(sentences) % 2 == 1 and sentences[-1].strip():
+            combined_sentences.append(sentences[-1].strip())
+            
+        # 短すぎるものや不要なものを除外
+        clean_sentences = [s for s in combined_sentences if len(s) > 10]
+
+        # バイト数制限チェックと、長すぎる場合の再分割
+        for sentence in clean_sentences:
+            if len(sentence.encode('utf-8')) > safe_byte_limit:
+                for i in range(0, len(sentence), char_chunk_size):
+                    final_sentences.append(sentence[i:i + char_chunk_size])
             else:
-                final_sentences.append(block)
+                final_sentences.append(sentence)
+        
         return final_sentences
     except Exception as e:
         raise RuntimeError(f"HTML parsing error: {e}")
@@ -32,6 +58,7 @@ def filter_sentences_with_oov(sentences: list) -> list:
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
+    
     interesting_sentences = []
     for sentence in sentences:
         try:
@@ -55,7 +82,8 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
         new_last_modified = head_response.headers.get('Last-Modified')
         new_etag = head_response.headers.get('ETag')
 
-        if (old_last_modified and old_last_modified == new_last_modified) or (old_etag and old_etag == new_etag):
+        if (old_last_modified and old_last_modified == new_last_modified) or \
+           (old_etag and old_etag == new_etag):
             supabase.table("crawl_queue").update({"extraction_status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
             return True
 
@@ -72,7 +100,9 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
             interesting_sentences = filter_sentences_with_oov(sentences)
             supabase.table("sentence_queue").delete().eq("crawl_queue_id", url_id).execute()
             if interesting_sentences:
-                supabase.table("sentence_queue").insert([{"crawl_queue_id": url_id, "sentence_text": s} for s in interesting_sentences]).execute()
+                supabase.table("sentence_queue").insert(
+                    [{"crawl_queue_id": url_id, "sentence_text": s} for s in interesting_sentences]
+                ).execute()
 
         supabase.table("crawl_queue").update({
             "extraction_status": "completed", "content_hash": new_hash,
@@ -88,17 +118,15 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
 
 def main():
     config = configparser.ConfigParser(); config.read('config.ini')
-    # ▼▼▼▼▼ [Preprocessor]セクションから設定を読み込むように変更 ▼▼▼▼▼
     max_workers = config.getint('Preprocessor', 'MAX_WORKERS')
     batch_size = config.getint('Preprocessor', 'BATCH_SIZE')
+    req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     safe_byte_limit = config.getint('Preprocessor', 'SAFE_BYTE_LIMIT')
     char_chunk_size = config.getint('Preprocessor', 'CHAR_CHUNK_SIZE')
-    # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
-    req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started ---")
+    print("--- Text Extraction Process Started (with Sentence Splitting) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
