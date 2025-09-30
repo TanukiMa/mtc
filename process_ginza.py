@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from supabase import create_client, Client
 import spacy
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
 
 _NLP_MODEL = None
 
