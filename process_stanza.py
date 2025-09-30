@@ -8,17 +8,6 @@ import stanza
 
 _NLP_MODEL = None
 
-def get_content_hash(content: bytes) -> str: return hashlib.sha256(content).hexdigest()
-def clean_text(text: str) -> str:
-    if not text: return ""
-    return re.sub(r'\s+', ' ', text).strip()
-def get_text_from_html(content: bytes) -> str:
-    try:
-        soup = BeautifulSoup(content, 'html.parser')
-        for s in soup(['script', 'style']): s.decompose()
-        return clean_text(' '.join(soup.stripped_strings))
-    except Exception as e: raise RuntimeError(f"HTML parsing error: {e}")
-
 def analyze_with_stanza(text: str) -> list:
     global _NLP_MODEL
     if not text.strip() or _NLP_MODEL is None: return []
@@ -28,16 +17,12 @@ def analyze_with_stanza(text: str) -> list:
         for i in range(0, len(text), chunk_size):
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
-            
-            # 1. Extract Named Entities (excluding DATE)
             for ent in doc.ents:
                 if ent.type != 'DATE':
                     word_text = ent.text.strip()
                     if len(word_text) > 1 and word_text not in found_texts:
                         found_words.append({"word": word_text, "source_tool": "stanza", "entity_category": ent.type, "pos_tag": "ENT"})
                         found_texts.add(word_text)
-            
-            # 2. Extract other Nouns
             for sentence in doc.sentences:
                 for word in sentence.words:
                     word_text = word.text.strip()
@@ -55,9 +40,11 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
 
     text_id, crawl_queue_id, text_to_analyze = text_item['id'], text_item['crawl_queue_id'], text_item['sentence_text']
     supabase: Client = create_client(supabase_url, supabase_key)
+
     try:
         url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
         source_url = url_res.data['url'] if url_res.data else f"unknown_url_for_crawl_id_{crawl_queue_id}"
+        
         new_words = analyze_with_stanza(text_to_analyze)
         if new_words:
             filtered_words = [w for w in new_words if w["word"] not in stop_words_set]
@@ -71,7 +58,8 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set):
                         supabase.table("word_occurrences").delete().eq("source_url", source_url).execute()
                         occurrences = [{"word_id": word_id, "source_url": source_url} for word, word_id in word_to_id_map.items() if word in word_to_id_map]
                         if occurrences:
-                            supabase.table("word_occurrences").insert(occurrences).execute()
+                            supabase.table("word_occurrences").upsert(occurrences, on_conflict="word_id, source_url").execute()
+        
         supabase.table("sentence_queue").update({"stanza_status": "completed"}).eq("id", text_id).execute()
         return True
     except Exception as e:
@@ -91,41 +79,26 @@ def main():
     response = supabase.table("stop_words").select("word").execute()
     stop_words_set = {item['word'] for item in response.data}
     print(f"[*] Loaded {len(stop_words_set)} stop words.")
-
-    # ▼▼▼▼▼ リトライ処理を追加 ▼▼▼▼▼
-    max_retries = 3
+    
     while True:
-        urls_to_process = None
-        for attempt in range(max_retries):
-            try:
-                res = supabase.table("sentence_queue").select("id, sentence_text, crawl_queue_id").eq("stanza_status", "queued").limit(batch_size).execute()
-                urls_to_process = res.data
-                break
-            except Exception as e:
-                print(f"  [!] DB query failed (attempt {attempt + 1}/{max_retries}): {e}", file=sys.stderr)
-                if attempt < max_retries - 1: time.sleep(5 * (attempt + 1))
-                else: print("[!!!] DB query failed after all retries. Exiting.", file=sys.stderr); return
+        res = supabase.table("sentence_queue").select("id, sentence_text, crawl_queue_id").eq("stanza_status", "queued").limit(batch_size).execute()
         
-        if not urls_to_process: 
+        if not res.data: 
             print("[*] No texts in queue for Stanza to process. Exiting.")
             break
         
-        ids = [item['id'] for item in urls_to_process]
-        try:
-            supabase.table("sentence_queue").update({"stanza_status": "processing"}).in_("id", ids).execute()
-            print(f"[*] Locked {len(urls_to_process)} texts for Stanza processing.")
-        except Exception as e:
-            print(f"  [!] DB lock failed: {e}", file=sys.stderr)
-            time.sleep(5)
-            continue
-        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
-        
+        ids = [item['id'] for item in res.data]
+        supabase.table("sentence_queue").update({"stanza_status": "processing"}).in_("id", ids).execute()
+        print(f"[*] Locked {len(res.data)} texts for Stanza processing.")
+
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_analyze_text, item, supabase_url, supabase_key, stop_words_set) for item in urls_to_process]
+            futures = [executor.submit(worker_analyze_text, item, supabase_url, supabase_key, stop_words_set) for item in res.data]
             results = [f.result() for f in futures]
-            success_count = sum(1 for r in results if r)
-            print(f"  [+] Batch complete (Success: {success_count}, Fail: {len(results) - success_count})")
             
+            success_count = sum(1 for r in results if r)
+            fail_count = len(results) - success_count
+            print(f"  [+] Batch complete (Success: {success_count}, Fail: {fail_count})")
+
     print("--- Stanza Content Processor Finished ---")
 
 if __name__ == "__main__":
