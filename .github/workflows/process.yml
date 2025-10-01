@@ -2,9 +2,9 @@
 name: Process NLP Queue (Scheduled)
 
 on:
-#  schedule:
-    # 3, 15, 21 UTC (日本時間 12:00, 00:00, 06:00) に実行
-#    - cron: '0 3,15,21 * * *'
+  schedule:
+#     3, 15, 21 UTC (日本時間 12:00, 00:00, 06:00) に実行
+    - cron: '0 3,15,21 * * *'
   workflow_dispatch:
 
 jobs:
