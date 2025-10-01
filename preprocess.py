@@ -1,5 +1,11 @@
 # preprocess.py
-import os, sys, re, time, configparser, requests, hashlib
+import os
+import sys
+import re
+import time
+import configparser
+import requests
+import hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
@@ -12,7 +18,8 @@ _WORKER_TOKENIZER = None
 
 def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
     """
-    HTMLコンテンツから意味のある「文」を抽出し、バイト数制限を超えないように分割して返す
+    HTMLコンテンツから意味のある文章ブロックを個別に抽出し、
+    さらに句読点で分割。バイト数制限も保証する。
     """
     final_sentences = []
     try:
@@ -20,34 +27,25 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'div'])
+        # 1. 文章が含まれる可能性のあるブロック要素をすべて取得
+        content_blocks = soup.find_all(['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
         
         all_sentences = []
         for block in content_blocks:
+            # 2. 各ブロック要素から個別にテキストを取得し、内部の不要な空白を整理
             block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
             if not block_text:
                 continue
-            
-            # 括弧内のテキストを独立した候補として抽出
-            parentheses_content = re.findall(r'[（(](.*?)[)）]', block_text)
-            all_sentences.extend(p.strip() for p in parentheses_content if p.strip())
 
-            # 括弧と中身、およびコロンを句点に置換
-            no_parentheses_text = re.sub(r'[（(].*?[)）]', '。', block_text)
-            processed_text = re.sub(r'[:：]', '。', no_parentheses_text)
-            
-            # 日付のパターン(例: 2018年6月13日)の後にも句点を挿入して、文の区切りとする
-            # これにより、「日付」と「タイトル」が分離される
-            processed_text = re.sub(r'(\d{4}年\d{1,2}月\d{1,2}日)', r'\1。', processed_text)
-
-            # 句読点(。！？)と改行を区切り文字として、文章を分割
-            sentences_in_block = re.split(r'(?<=[。！？\n])\s*', processed_text)
+            # 3. ブロック内のテキストを句読点でさらに「文」に分割
+            sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
             all_sentences.extend(sentences_in_block)
 
+        # 4. 最終的なクリーニングとフィルタリング
         clean_sentences = []
         for s in all_sentences:
-            s = s.strip().strip('。「』') # 不要な記号を削除
-            if len(s) > 5 and "ページの先頭へ戻る" not in s:
+            s = s.strip()
+            if len(s) > 10 and "ページの先頭へ戻る" not in s:
                 clean_sentences.append(s)
         
         for sentence in clean_sentences:
@@ -81,22 +79,27 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     session.mount('https://', HTTPAdapter(max_retries=retries))
+
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         head_response = session.head(url, timeout=request_timeout, headers=headers, allow_redirects=True)
         head_response.raise_for_status()
         new_last_modified = head_response.headers.get('Last-Modified')
         new_etag = head_response.headers.get('ETag')
+
         if (old_last_modified and old_last_modified == new_last_modified) or \
            (old_etag and old_etag == new_etag):
             supabase.table("crawl_queue").update({"extraction_status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
             return True
+
         response = session.get(url, timeout=request_timeout, headers=headers, allow_redirects=True)
         response.raise_for_status()
         new_hash = hashlib.sha256(response.content).hexdigest()
+
         if old_hash and old_hash == new_hash:
             supabase.table("crawl_queue").update({"extraction_status": "completed", "last_modified": new_last_modified, "etag": new_etag, "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
             return True
+
         sentences = get_sentences_from_html(response.content, safe_byte_limit, char_chunk_size)
         if sentences:
             interesting_sentences = filter_sentences_with_oov(sentences)
@@ -105,12 +108,14 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
                 supabase.table("sentence_queue").insert(
                     [{"crawl_queue_id": url_id, "sentence_text": s} for s in interesting_sentences]
                 ).execute()
+
         supabase.table("crawl_queue").update({
             "extraction_status": "completed", "content_hash": new_hash,
             "last_modified": new_last_modified, "etag": new_etag,
             "processed_at": datetime.now(timezone.utc).isoformat()
         }).eq("id", url_id).execute()
         return True
+
     except Exception as e:
         print(f"  [!] Preprocessing error: {url} - {e}", file=sys.stderr)
         supabase.table("crawl_queue").update({"extraction_status": "failed", "error_message": str(e)}).eq("id", url_id).execute()
@@ -123,22 +128,27 @@ def main():
     req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
     safe_byte_limit = config.getint('Preprocessor', 'SAFE_BYTE_LIMIT')
     char_chunk_size = config.getint('Preprocessor', 'CHAR_CHUNK_SIZE')
+    
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started ---")
+    print("--- Text Extraction Process Started (Block-aware) ---")
+
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
         if not res.data:
             print("[*] No URLs to preprocess in queue. Exiting.")
             break
+        
         ids = [item['id'] for item in res.data]
         supabase.table("crawl_queue").update({"extraction_status": "processing"}).in_("id", ids).execute()
         print(f"[*] Locked {len(res.data)} URLs for extraction.")
+
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(worker_preprocess_url, item, supabase_url, supabase_key, req_timeout, safe_byte_limit, char_chunk_size) for item in res.data]
             results = [f.result() for f in futures]
             success_count = sum(1 for r in results if r)
             print(f"  [+] Batch complete (Success: {success_count}, Fail: {len(results) - success_count})")
+    
     print("--- Text Extraction Process Finished ---")
 
 if __name__ == "__main__":
