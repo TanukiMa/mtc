@@ -1,11 +1,5 @@
 # preprocess.py
-import os
-import sys
-import re
-import time
-import configparser
-import requests
-import hashlib
+import os, sys, re, time, configparser, requests, hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
@@ -18,7 +12,8 @@ _WORKER_TOKENIZER = None
 
 def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
     """
-    HTMLコンテンツから意味のある「文」を抽出し、バイト数制限を超えないように分割して返す
+    HTMLコンテンツから意味のある文章ブロックを個別に抽出し、
+    さらに句読点で分割。バイト数制限も保証する。
     """
     final_sentences = []
     try:
@@ -26,33 +21,27 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        # ▼▼▼▼▼ 抽出ロジックを全面的に修正 ▼▼▼▼▼
         # 1. 文章が含まれる可能性のあるブロック要素をすべて取得
-        # h1-h6, p, li などのタグを対象とする
-        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
+        content_blocks = soup.find_all(['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li'])
         
         all_sentences = []
         for block in content_blocks:
-            # 各ブロックからテキストを取得し、内部の不要な空白を整理
+            # 2. 各ブロック要素から個別にテキストを取得
             block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
             if not block_text:
                 continue
 
-            # 2. ブロック内のテキストを句読点でさらに「文」に分割
-            #    (?<=[。！？]) は、区切り文字を文末に残すための正規表現
+            # 3. ブロック内のテキストを句読点でさらに「文」に分割
             sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
             all_sentences.extend(sentences_in_block)
 
-        # 3. 最終的なクリーニングとフィルタリング
+        # 4. 最終的なクリーニングとフィルタリング
         clean_sentences = []
         for s in all_sentences:
             s = s.strip()
-            # 短すぎる文や定型句を除外
-            if len(s) > 10 and "必要です" not in s:
+            if len(s) > 10 and "ページの先頭へ戻る" not in s:
                 clean_sentences.append(s)
-        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
         
-        # バイト数制限チェックと、長すぎる場合の再分割
         for sentence in clean_sentences:
             if len(sentence.encode('utf-8')) > safe_byte_limit:
                 for i in range(0, len(sentence), char_chunk_size):
@@ -65,7 +54,6 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         raise RuntimeError(f"HTML parsing error: {e}")
 
 def filter_sentences_with_oov(sentences: list) -> list:
-    """未知語(OOV)を含む文章のみをフィルタリングする"""
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
@@ -137,7 +125,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (with Block & Sentence Splitting) ---")
+    print("--- Text Extraction Process Started (Block-aware) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
