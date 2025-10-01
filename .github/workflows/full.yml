@@ -1,0 +1,82 @@
+# .github/workflows/full-pipeline.yml
+name: Full Pipeline (Discover, Preprocess, Process) - Daily
+
+on:
+#  schedule:
+    # 毎日 09:00 UTC (日本時間 18:00) に実行
+#    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - run: pip install requests beautifulsoup4 supabase configparser url-normalize
+      - name: Run URL Discoverer
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python discover_urls.py
+
+  preprocess:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        instance: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - run: pip install sudachipy SudachiDict-full requests beautifulsoup4 supabase configparser
+      - name: Run Text Extractor (Instance ${{ matrix.instance }})
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python preprocess.py
+
+  process_ginza:
+    needs: preprocess
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        instance: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: Install GiNZA and dependencies
+        run: |
+          pip install -U ginza ja_ginza_electra
+          pip install requests beautifulsoup4 supabase configparser
+      - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python process_ginza.py
+
+  process_stanza:
+    needs: preprocess
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        instance: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: Install Stanza and dependencies
+        run: |
+          pip install "numpy<2.0" stanza
+          pip install requests beautifulsoup4 supabase configparser
+      - name: Pre-download Stanza model
+        run: |
+          python -c "import stanza; stanza.download('ja', verbose=False)"
+      - name: Run Stanza Processor (Instance ${{ matrix.instance }})
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python process_stanza.py
