@@ -2,12 +2,9 @@
 name: Process NLP Queue (Scheduled)
 
 on:
-  # schedule:
-  #   - cron: '0 3,15,21 * * *' # JST 12:00, 00:00, 06:00
   workflow_dispatch:
 
 jobs:
-  # Stage 1: Check Queue for Work
   check_queue:
     runs-on: ubuntu-latest
     outputs:
@@ -16,6 +13,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+      - name: Set up local DNS cache for stability
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unbound
+          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
+          sudo service unbound restart
+          echo "--- Unbound service status ---"
+          sudo service unbound status || echo "Failed to get service status, continuing..."
       - run: pip install supabase
       - name: Count items in sentence_queue
         id: count
@@ -24,7 +30,6 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python check_queue.py
 
-  # Stage 2a: Process with GiNZA
   process_ginza:
     needs: check_queue
     if: needs.check_queue.outputs.ginza_count > 0
@@ -33,12 +38,18 @@ jobs:
       matrix:
         instance: [1, 2]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: Set up local DNS cache for stability
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unbound
+          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
+          sudo service unbound restart
+          echo "--- Unbound service status ---"
+          sudo service unbound status || echo "Failed to get service status, continuing..."
       - name: Install GiNZA and dependencies
         run: |
           pip install -U ginza ja_ginza_electra
@@ -49,7 +60,6 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python process_ginza.py
 
-  # Stage 2b: Process with Stanza
   process_stanza:
     needs: check_queue
     if: needs.check_queue.outputs.stanza_count > 0
@@ -58,12 +68,18 @@ jobs:
       matrix:
         instance: [1, 2]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - name: Set up local DNS cache for stability
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unbound
+          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
+          sudo service unbound restart
+          echo "--- Unbound service status ---"
+          sudo service unbound status || echo "Failed to get service status, continuing..."
       - name: Install Stanza and dependencies
         run: |
           pip install "numpy<2.0" stanza
