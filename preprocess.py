@@ -18,10 +18,12 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        # ▼▼▼▼▼ 抽出対象タグから汎用的な 'div' を削除し、より具体的なタグに絞る ▼▼▼▼▼
-        target_tags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td']
-        content_blocks = soup.find_all(target_tags)
-        # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
+        # ステップ2: テキスト連結の原因となるコンテナタグを「開梱」して無害化
+        for tag in soup.find_all(['div', 'ul', 'ol', 'table', 'tbody', 'tr']):
+            tag.unwrap()
+
+        # ステップ3: 末端のブロック要素だけを抽出
+        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
         
         all_sentences = []
         for block in content_blocks:
@@ -29,7 +31,6 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
             if not block_text:
                 continue
 
-            # 句読点を基準に文を分割
             sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
             all_sentences.extend(sentences_in_block)
 
@@ -39,7 +40,6 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
             if len(s) > 10 and "ページの先頭へ戻る" not in s and "Adobe Reader" not in s:
                 clean_sentences.append(s)
         
-        # バイト数制限チェックと、長すぎる場合の再分割
         for sentence in clean_sentences:
             if len(sentence.encode('utf-8')) > safe_byte_limit:
                 for i in range(0, len(sentence), char_chunk_size):
@@ -129,7 +129,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (Block-aware) ---")
+    print("--- Text Extraction Process Started (with unwrap) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
