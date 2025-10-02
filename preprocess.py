@@ -24,13 +24,17 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        for tag in soup.find_all(['div', 'ul', 'ol', 'table', 'tbody', 'tr']):
-            tag.unwrap()
+        target_tags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td', 'div']
+        all_blocks = soup.find_all(target_tags)
         
-        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
-        
+        leaf_blocks = []
+        for block in all_blocks:
+            # もしブロックの内部に他のターゲットタグが存在しないなら、それは末端要素
+            if not block.find_all(target_tags):
+                leaf_blocks.append(block)
+
         all_sentences = []
-        for block in content_blocks:
+        for block in leaf_blocks:
             block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
             if not block_text:
                 continue
@@ -41,9 +45,10 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         clean_sentences = []
         for s in all_sentences:
             s = s.strip()
-            if len(s) > 10 and "ページの先頭へ戻る" not in s:
+            if len(s) > 10 and "ページの先頭へ戻る" not in s and "Adobe Reader" not in s:
                 clean_sentences.append(s)
         
+        # バイト数制限チェックと、長すぎる場合の再分割
         for sentence in clean_sentences:
             if len(sentence.encode('utf-8')) > safe_byte_limit:
                 for i in range(0, len(sentence), char_chunk_size):
@@ -80,6 +85,12 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
         headers = {'User-Agent': 'Mozilla/5.0'}
         head_response = session.head(url, timeout=request_timeout, headers=headers, allow_redirects=True)
         head_response.raise_for_status()
+        
+        content_type = head_response.headers.get("content-type", "").lower()
+        if "html" not in content_type:
+            supabase.table("crawl_queue").update({"extraction_status": "completed", "processed_at": datetime.now(timezone.utc).isoformat()}).eq("id", url_id).execute()
+            return True
+
         new_last_modified = head_response.headers.get('Last-Modified')
         new_etag = head_response.headers.get('ETag')
 
@@ -140,7 +151,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started ---")
+    print("--- Text Extraction Process Started (Leaf Node Extraction) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
