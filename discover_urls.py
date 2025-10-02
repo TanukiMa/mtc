@@ -42,7 +42,7 @@ def main():
     print(f"--- URL Discovery Started (Depth: {crawl_depth}) ---")
 
     session = requests.Session()
-    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504], , connect=3)
     session.mount('https://', HTTPAdapter(max_retries=retries))
 
     all_discovered_links = set()
