@@ -1,5 +1,11 @@
 # preprocess.py
-import os, sys, re, time, configparser, requests, hashlib
+import os
+import sys
+import re
+import time
+import configparser
+import requests
+import hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from bs4 import BeautifulSoup
@@ -18,11 +24,9 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        # ステップ2: テキスト連結の原因となるコンテナタグを「開梱」して無害化
         for tag in soup.find_all(['div', 'ul', 'ol', 'table', 'tbody', 'tr']):
             tag.unwrap()
-
-        # ステップ3: 末端のブロック要素だけを抽出
+        
         content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
         
         all_sentences = []
@@ -37,7 +41,7 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         clean_sentences = []
         for s in all_sentences:
             s = s.strip()
-            if len(s) > 10 and "ページの先頭へ戻る" not in s and "Adobe Reader" not in s:
+            if len(s) > 10 and "ページの先頭へ戻る" not in s:
                 clean_sentences.append(s)
         
         for sentence in clean_sentences:
@@ -103,9 +107,12 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
             interesting_sentences = filter_sentences_with_oov(sentences)
             supabase.table("sentence_queue").delete().eq("crawl_queue_id", url_id).execute()
             if interesting_sentences:
-                supabase.table("sentence_queue").insert(
-                    [{"crawl_queue_id": url_id, "sentence_text": s} for s in interesting_sentences]
-                ).execute()
+                insert_chunk_size = 100 
+                for i in range(0, len(interesting_sentences), insert_chunk_size):
+                    chunk = interesting_sentences[i:i + insert_chunk_size]
+                    supabase.table("sentence_queue").insert(
+                        [{"crawl_queue_id": url_id, "sentence_text": s} for s in chunk]
+                    ).execute()
 
         supabase.table("crawl_queue").update({
             "extraction_status": "completed", "content_hash": new_hash,
@@ -114,6 +121,10 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
         }).eq("id", url_id).execute()
         return True
 
+    except AttributeError as attr_err:
+        print(f"  [!] Fatal worker error (AttributeError): {url} - {attr_err}", file=sys.stderr)
+        supabase.table("crawl_queue").update({"extraction_status": "failed", "error_message": f"AttributeError: {attr_err}"}).eq("id", url_id).execute()
+        return False
     except Exception as e:
         print(f"  [!] Preprocessing error: {url} - {e}", file=sys.stderr)
         supabase.table("crawl_queue").update({"extraction_status": "failed", "error_message": str(e)}).eq("id", url_id).execute()
@@ -129,7 +140,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (with unwrap) ---")
+    print("--- Text Extraction Process Started ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
