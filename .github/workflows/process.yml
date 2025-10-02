@@ -1,45 +1,73 @@
-# .github/workflows/process-only-pipeline.yml
+# .github/workflows/process.yml
 name: Process NLP Queue (Scheduled)
 
 on:
-  schedule:
-#     3, 15, 21 UTC (日本時間 12:00, 00:00, 06:00) に実行
-    - cron: '0 3,15,21 * * *'
+  # schedule:
+  #   - cron: '0 3,15,21 * * *' # JST 12:00, 00:00, 06:00
   workflow_dispatch:
 
 jobs:
+  # Stage 1: Check Queue for Work
+  check_queue:
+    runs-on: ubuntu-latest
+    outputs:
+      ginza_count: ${{ steps.count.outputs.ginza_count }}
+      stanza_count: ${{ steps.count.outputs.stanza_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install supabase
+      - name: Count items in sentence_queue
+        id: count
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python check_queue.py
+
+  # Stage 2a: Process with GiNZA
   process_ginza:
+    needs: check_queue
+    if: needs.check_queue.outputs.ginza_count > 0
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
         instance: [1, 2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
       - name: Install GiNZA and dependencies
         run: |
           pip install -U ginza ja_ginza_electra
-          pip install requests beautifulsoup4 supabase configparser
+          pip install supabase configparser
       - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python process_ginza.py
 
+  # Stage 2b: Process with Stanza
   process_stanza:
+    needs: check_queue
+    if: needs.check_queue.outputs.stanza_count > 0
     runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
         instance: [1, 2]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.10' }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
       - name: Install Stanza and dependencies
         run: |
           pip install "numpy<2.0" stanza
-          pip install requests beautifulsoup4 supabase configparser
+          pip install supabase configparser
       - name: Pre-download Stanza model
         run: |
           python -c "import stanza; stanza.download('ja', verbose=False)"
