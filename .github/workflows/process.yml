@@ -15,15 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-      - name: Set up local DNS cache for stability
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unbound
-          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
-          sudo service unbound restart
-          echo "--- Unbound service status ---"
-          sudo service unbound status || echo "Failed to get service status, continuing..."
       - run: pip install supabase
       - name: Count items in sentence_queue
         id: count
