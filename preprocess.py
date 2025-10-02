@@ -13,39 +13,32 @@ from supabase import create_client, Client
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sudachipy import tokenizer, dictionary
+import chardet
 
 _WORKER_TOKENIZER = None
 
 def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
-    """
-    HTMLコンテンツから意味のある文章ブロックを個別に抽出し、
-    さらに句読点で分割。バイト数制限も保証する。
-    """
     final_sentences = []
     try:
-        soup = BeautifulSoup(content, 'html.parser')
+        soup = BeautifulSoup(content, 'html5lib')
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        # 1. 文章が含まれる可能性のあるブロック要素をすべて取得
-        content_blocks = soup.find_all(['div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
+        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td', 'th'])
         
         all_sentences = []
         for block in content_blocks:
-            # 2. 各ブロック要素から個別にテキストを取得し、内部の不要な空白を整理
             block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
             if not block_text:
                 continue
 
-            # 3. ブロック内のテキストを句読点でさらに「文」に分割
             sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
             all_sentences.extend(sentences_in_block)
 
-        # 4. 最終的なクリーニングとフィルタリング
         clean_sentences = []
         for s in all_sentences:
             s = s.strip()
-            if len(s) > 10 and "ページの先頭へ戻る" not in s:
+            if len(s) > 10 and "ページの先頭へ戻る" not in s and "Adobe Reader" not in s:
                 clean_sentences.append(s)
         
         for sentence in clean_sentences:
@@ -94,6 +87,12 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
 
         response = session.get(url, timeout=request_timeout, headers=headers, allow_redirects=True)
         response.raise_for_status()
+        
+        if response.encoding == 'ISO-8859-1':
+            encoding = chardet.detect(response.content)['encoding']
+            if encoding:
+                response.encoding = encoding
+                
         new_hash = hashlib.sha256(response.content).hexdigest()
 
         if old_hash and old_hash == new_hash:
@@ -131,7 +130,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (Block-aware) ---")
+    print("--- Text Extraction Process Started (Block-aware, html5lib) ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
