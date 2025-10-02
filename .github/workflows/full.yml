@@ -6,7 +6,7 @@ on:
 
 jobs:
   discover:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
 
   preprocess:
     needs: discover
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
         instance: [1, 2, 3, 4]
@@ -67,7 +67,7 @@ jobs:
 
   check_queue:
     needs: preprocess
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     outputs:
       ginza_count: ${{ steps.count.outputs.ginza_count }}
       stanza_count: ${{ steps.count.outputs.stanza_count }}
