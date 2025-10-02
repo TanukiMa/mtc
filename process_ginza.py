@@ -1,14 +1,11 @@
 # process_ginza.py
-import os
-import sys
-import re
-import time
-import configparser
+import os, sys, re, time, configparser, hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor
 from supabase import create_client, Client
 import spacy
 import warnings
+from postgrest.exceptions import APIError
 
 warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
 
@@ -30,6 +27,7 @@ def analyze_with_ginza(text: str) -> list:
             chunk = text[i:i + chunk_size]
             doc = _NLP_MODEL(chunk)
             
+            # 1. Extract Named Entities (excluding DATE)
             for ent in doc.ents:
                 if ent.label_ != 'DATE':
                     word_text = ent.text.strip()
@@ -37,6 +35,7 @@ def analyze_with_ginza(text: str) -> list:
                         found_words.append({"word": word_text, "source_tool": "ginza", "entity_category": ent.label_, "pos_tag": "ENT"})
                         found_texts.add(word_text)
 
+            # 2. Extract other Nouns, ensuring they are not part of a DATE entity
             for token in doc:
                 word_text = token.text.strip()
                 if token.pos_ == "NOUN" and token.ent_type_ == "" and len(word_text) > 1 and word_text not in found_texts:
@@ -54,45 +53,64 @@ def worker_analyze_text(text_item, supabase_url, supabase_key, stop_words_set, d
 
     text_id, crawl_queue_id, text_to_analyze = text_item['id'], text_item['crawl_queue_id'], text_item['sentence_text']
     supabase = create_client(supabase_url, supabase_key)
+    
+    max_db_retries = 3
 
-    try:
-        url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
-        source_url = url_res.data['url'] if url_res.data else f"unknown_url_for_crawl_id_{crawl_queue_id}"
+    for attempt in range(max_db_retries):
+        try:
+            url_res = supabase.table("crawl_queue").select("url").eq("id", crawl_queue_id).single().execute()
+            source_url = url_res.data['url'] if url_res.data else f"unknown_url_for_crawl_id_{crawl_queue_id}"
 
-        new_words = analyze_with_ginza(text_to_analyze)
-        if new_words:
-            sanitized_words = []
-            for word_data in new_words:
-                word_text = word_data["word"]
-                if word_text not in stop_words_set:
-                    word_data['word'] = word_text.replace('\x00', '')
-                    if word_data['word']:
-                        sanitized_words.append(word_data)
+            new_words = analyze_with_ginza(text_to_analyze)
+            if new_words:
+                sanitized_words = []
+                for word_data in new_words:
+                    word_text = word_data["word"]
+                    if word_text not in stop_words_set:
+                        word_data['word'] = word_text.replace('\x00', '')
+                        if word_data['word']:
+                            sanitized_words.append(word_data)
+                
+                if sanitized_words:
+                    supabase.table("word_occurrences").delete().eq("source_url", source_url).execute()
+
+                    for i in range(0, len(sanitized_words), db_write_chunk_size):
+                        chunk = sanitized_words[i:i + db_write_chunk_size]
+                        
+                        upsert_res = supabase.table("unique_words").upsert(chunk, on_conflict="word, source_tool").execute()
+                        if not upsert_res.data: continue
+
+                        word_texts_chunk = [w['word'] for w in chunk]
+                        select_res = supabase.table("unique_words").select("id, word").in_("word", word_texts_chunk).eq("source_tool", "ginza").execute()
+                        word_to_id_map = {item['word']: item['id'] for item in select_res.data}
+
+                        if word_to_id_map:
+                            occurrences = [{"word_id": word_id, "source_url": source_url} for word, word_id in word_to_id_map.items() if word in word_to_id_map]
+                            if occurrences:
+                                supabase.table("word_occurrences").upsert(occurrences, on_conflict="word_id, source_url").execute()
+
+            supabase.table("sentence_queue").update({"ginza_status": "completed"}).eq("id", text_id).execute()
+            return True
+
+        except APIError as e:
+            if e.code == '40P01' or (hasattr(e, 'code') and e.code.startswith('5')):
+                if attempt < max_db_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    print(f"  [!] DB Deadlock/Error on text ID {text_id}. Retrying in {wait_time}s... ({e.message})", file=sys.stderr)
+                    time.sleep(wait_time)
+                    continue
+            print(f"  [!] GiNZA worker DB error on text ID {text_id}: {e}", file=sys.stderr)
+            supabase.table("sentence_queue").update({"ginza_status": "failed"}).eq("id", text_id).execute()
+            return False
             
-            if sanitized_words:
-                supabase.table("word_occurrences").delete().eq("source_url", source_url).execute()
-
-                for i in range(0, len(sanitized_words), db_write_chunk_size):
-                    chunk = sanitized_words[i:i + db_write_chunk_size]
-                    
-                    upsert_res = supabase.table("unique_words").upsert(chunk, on_conflict="word, source_tool").execute()
-                    if not upsert_res.data: continue
-
-                    word_texts_chunk = [w['word'] for w in chunk]
-                    select_res = supabase.table("unique_words").select("id, word").in_("word", word_texts_chunk).eq("source_tool", "ginza").execute()
-                    word_to_id_map = {item['word']: item['id'] for item in select_res.data}
-
-                    if word_to_id_map:
-                        occurrences = [{"word_id": word_id, "source_url": source_url} for word, word_id in word_to_id_map.items() if word in word_to_id_map]
-                        if occurrences:
-                            supabase.table("word_occurrences").upsert(occurrences, on_conflict="word_id, source_url").execute()
-
-        supabase.table("sentence_queue").update({"ginza_status": "completed"}).eq("id", text_id).execute()
-        return True
-    except Exception as e:
-        print(f"  [!] GiNZA worker error on text ID {text_id}: {e}", file=sys.stderr)
-        supabase.table("sentence_queue").update({"ginza_status": "failed"}).eq("id", text_id).execute()
-        return False
+        except Exception as e:
+            print(f"  [!] GiNZA worker unexpected error on text ID {text_id}: {e}", file=sys.stderr)
+            supabase.table("sentence_queue").update({"ginza_status": "failed"}).eq("id", text_id).execute()
+            return False
+    
+    print(f"  [!!!] GiNZA worker failed on text ID {text_id} after {max_db_retries} retries.", file=sys.stderr)
+    supabase.table("sentence_queue").update({"ginza_status": "failed"}).eq("id", text_id).execute()
+    return False
 
 def main():
     """Main process orchestrator."""
@@ -105,9 +123,13 @@ def main():
     supabase = create_client(supabase_url, supabase_key)
     print("--- GiNZA Content Processor Started ---")
 
-    response = supabase.table("stop_words").select("word").execute()
-    stop_words_set = {item['word'] for item in response.data}
-    print(f"[*] Loaded {len(stop_words_set)} stop words.")
+    try:
+        response = supabase.table("stop_words").select("word").execute()
+        stop_words_set = {item['word'] for item in response.data}
+        print(f"[*] Loaded {len(stop_words_set)} stop words.")
+    except Exception as e:
+        print(f"[!] Could not load stop words: {e}", file=sys.stderr)
+        stop_words_set = set()
     
     max_retries = 3
     while True:
