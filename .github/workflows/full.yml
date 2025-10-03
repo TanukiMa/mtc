@@ -1,14 +1,29 @@
 # .github/workflows/full.yml
-name: Full Pipeline (Daily)
+name: Local DB Pipeline (Discover, Preprocess, Process, Sync)
 
 on:
-  schedule:
-    - cron: '0 9 * * *'
   workflow_dispatch:
 
 jobs:
-  discover:
-    runs-on: ubuntu-24.04-arm
+  run_pipeline:
+    runs-on: ubuntu-latest
+    
+    # ジョブ実行中だけ存在するPostgreSQLサービスを起動
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: localdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,138 +31,47 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      
-      - name: Set up local DNS cache for stability
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unbound
-          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
-          sudo service unbound restart
-          echo "--- Unbound service status ---"
-          sudo service unbound status || echo "Failed to get service status, continuing..."
 
-      - name: Install dependencies
-        run: pip install requests beautifulsoup4 supabase configparser url-normalize
-      - name: Run URL Discoverer
+      - name: Install all dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpq-dev
+          pip install psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
+          pip install -U ginza ja_ginza_electra
+          pip install "numpy<2.0" stanza
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U runner; do sleep 2; done
+          echo "PostgreSQL is ready!"
+
+      - name: 1. Initialize Local Database
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
+        run: python init_local_db.py
+
+      - name: 2. Run URL Discoverer
+        env:
+          LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
         run: python discover_urls.py
-
-  preprocess:
-    needs: discover
-    runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        instance: [1, 2, 3, 4]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Set up local DNS cache for stability
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unbound
-          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
-          sudo service unbound restart
-          echo "--- Unbound service status ---"
-          sudo service unbound status || echo "Failed to get service status, continuing..."
-
-      - name: Install dependencies
-        run: pip install sudachipy SudachiDict-full requests beautifulsoup4 supabase configparser html5lib chardet
-      - name: Run Text Extractor (Instance ${{ matrix.instance }})
+      
+      - name: 3. Run Preprocessor
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
         run: python preprocess.py
 
-  check_queue:
-    needs: preprocess
-    runs-on: ubuntu-24.04-arm
-    outputs:
-      ginza_count: ${{ steps.count.outputs.ginza_count }}
-      stanza_count: ${{ steps.count.outputs.stanza_count }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-      - run: pip install supabase
-      - name: Count items in sentence_queue
-        id: count
+      - name: 4. Run NLP Processors in Parallel
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python check_queue.py
+          LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
+        run: |
+          python process_ginza.py &
+          python process_stanza.py &
+          wait
 
-  process_ginza:
-    needs: check_queue
-    if: needs.check_queue.outputs.ginza_count > 0
-    runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        instance: [1, 2]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Set up local DNS cache for stability
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unbound
-          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
-          sudo service unbound restart
-          echo "--- Unbound service status ---"
-          sudo service unbound status || echo "Failed to get service status, continuing..."
-      - name: Install GiNZA and dependencies
-        run: |
-          pip install -U ginza ja_ginza_electra
-          pip install supabase configparser
-      - name: Run GiNZA Processor (Instance ${{ matrix.instance }})
+      - name: 5. Sync Results to Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python process_ginza.py
-
-  process_stanza:
-    needs: check_queue
-    if: needs.check_queue.outputs.stanza_count > 0
-    runs-on: ubuntu-24.04-arm
-    strategy:
-      matrix:
-        instance: [1, 2]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Set up local DNS cache for stability
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unbound
-          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 1.1.1.1" | sudo tee -a /etc/resolv.conf
-          sudo service unbound restart
-          echo "--- Unbound service status ---"
-          sudo service unbound status || echo "Failed to get service status, continuing..."
-      - name: Install Stanza and dependencies
-        run: |
-          pip install "numpy<2.0" stanza
-          pip install supabase configparser
-      - name: Pre-download Stanza model
-        run: python -c "import stanza; stanza.download('ja', verbose=False)"
-      - name: Run Stanza Processor (Instance ${{ matrix.instance }})
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python process_stanza.py
+          LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
+        run: python sync_to_supabase.py
