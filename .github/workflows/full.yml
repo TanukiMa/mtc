@@ -38,7 +38,6 @@ jobs:
           pip install -U ginza ja_ginza_electra
           pip install "numpy<2.0" stanza
 
-      # ▼▼▼▼▼ このステップにenvを追加 ▼▼▼▼▼
       - name: Wait for PostgreSQL
         env:
           PGPASSWORD: password
@@ -48,7 +47,6 @@ jobs:
             sleep 2
           done
           echo "PostgreSQL is ready!"
-      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
       - name: 1. Initialize Local Database
         env:
