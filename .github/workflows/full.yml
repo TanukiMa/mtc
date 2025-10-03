@@ -33,7 +33,7 @@ jobs:
 
       - name: Install all dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev
+          sudo apt-get update && sudo apt-get install -y libpq-dev postgresql-client-common
           pip install psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
           pip install -U ginza ja_ginza_electra
           pip install "numpy<2.0" stanza
