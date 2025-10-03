@@ -7,6 +7,10 @@ import chardet
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sudachipy import tokenizer, dictionary
+import warnings
+from bs4 import XMLParsedAsHTMLWarning
+
+warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
 # SQLAlchemy関連のインポート
 from sqlalchemy.orm import joinedload

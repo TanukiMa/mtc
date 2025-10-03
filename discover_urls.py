@@ -12,6 +12,10 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from url_normalize import url_normalize
+import warnings
+from bs4 import XMLParsedAsHTMLWarning
+
+warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
 # SQLAlchemy関連のインポート
 from sqlalchemy.dialects.postgresql import insert
