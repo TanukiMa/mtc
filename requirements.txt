@@ -1,0 +1,17 @@
+beautifulsoup4
+chardet
+psycopg2_binary
+Requests
+spacy
+SQLAlchemy
+stanza
+sudachipy
+SudachiDict-full
+supabase
+url_normalize
+urllib3
+numpy<2.0
+configparser
+url-normalize
+html5lib
+ja_ginza_electra
