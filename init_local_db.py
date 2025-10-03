@@ -1,7 +1,9 @@
 # init_local_db.py
+import os
 from db_utils import get_local_db_session, get_supabase_client, Base, CrawlQueue, StopWord
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.postgresql import insert
+import psycopg2.extras
 
 def main():
     print("[*] Initializing local PostgreSQL database...")
