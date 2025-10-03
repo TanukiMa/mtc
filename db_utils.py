@@ -33,6 +33,7 @@ class SentenceQueue(Base):
     sentence_text = Column(String, nullable=False)
     ginza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
     stanza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
+    crawl_queue = relationship("CrawlQueue")
 
 class UniqueWord(Base):
     __tablename__ = 'unique_words'
