@@ -34,7 +34,7 @@ jobs:
       - name: Install all dependencies
         run: |
           sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client
-          pip install html5lib chardet psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
+          pip install sudachidict_full html5lib chardet psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
           pip install -U ginza ja_ginza_electra
           pip install "numpy<2.0" stanza
 
