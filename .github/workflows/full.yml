@@ -8,7 +8,6 @@ jobs:
   run_pipeline:
     runs-on: ubuntu-latest
     
-    # ジョブ実行中だけ存在するPostgreSQLサービスを起動
     services:
       postgres:
         image: postgres:14
@@ -69,7 +68,21 @@ jobs:
           python process_stanza.py &
           wait
 
-      - name: 5. Sync Results to Supabase
+      - name: 5. Dump Local Database and Upload Artifact
+        env:
+          PGPASSWORD: password # pg_dumpがパスワードプロンプトなしで実行できるようにする
+        run: |
+          echo "Dumping local database to local_db_dump.sql..."
+          pg_dump --clean --if-exists -h localhost -p 5432 -U runner -d localdb > local_db_dump.sql
+          echo "Dump complete."
+      
+      - name: Upload database dump as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-dump-${{ github.run_id }}
+          path: local_db_dump.sql
+
+      - name: 6. Sync Results to Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
