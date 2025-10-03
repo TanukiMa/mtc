@@ -3,6 +3,7 @@ import os
 from sqlalchemy import create_engine, text, Column, Integer, String, Enum, DateTime, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.schema import UniqueConstraint
 from supabase import create_client, Client
 import enum
 
