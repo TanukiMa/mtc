@@ -33,15 +33,22 @@ jobs:
 
       - name: Install all dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client-common postgresql-client-16
-          pip install chardet psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
+          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client
+          pip install html5lib chardet psycopg2-binary sqlalchemy supabase requests beautifulsoup4 configparser url-normalize
           pip install -U ginza ja_ginza_electra
           pip install "numpy<2.0" stanza
 
+      # ▼▼▼▼▼ このステップにenvを追加 ▼▼▼▼▼
       - name: Wait for PostgreSQL
+        env:
+          PGPASSWORD: password
         run: |
-          until pg_isready -h localhost -p 5432 -U runner; do sleep 2; done
+          until pg_isready -h localhost -p 5432 -U runner; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
           echo "PostgreSQL is ready!"
+      # ▲▲▲▲▲ ここまで修正 ▲▲▲▲▲
 
       - name: 1. Initialize Local Database
         env:
@@ -70,7 +77,7 @@ jobs:
 
       - name: 5. Dump Local Database and Upload Artifact
         env:
-          PGPASSWORD: password # pg_dumpがパスワードプロンプトなしで実行できるようにする
+          PGPASSWORD: password
         run: |
           echo "Dumping local database to local_db_dump.sql..."
           pg_dump --clean --if-exists -h localhost -p 5432 -U runner -d localdb > local_db_dump.sql
