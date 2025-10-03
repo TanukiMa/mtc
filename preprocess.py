@@ -15,40 +15,50 @@ from urllib3.util.retry import Retry
 from sudachipy import tokenizer, dictionary
 import chardet
 
+# --- Globals for worker processes ---
 _WORKER_TOKENIZER = None
 
+# --- Helper Functions ---
 def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
+    """
+    Extracts meaningful sentences from HTML content using a multi-stage process.
+    """
     final_sentences = []
     try:
+        # Use html5lib parser for robustness against broken HTML.
         soup = BeautifulSoup(content, 'html5lib')
+        
+        # 1. Decompose (remove) non-content sections entirely.
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        target_tags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td', 'div']
-        all_blocks = soup.find_all(target_tags)
+        # 2. Unwrap generic container tags to flatten the structure.
+        for tag in soup.find_all(['div', 'ul', 'ol', 'table', 'tbody', 'tr']):
+            tag.unwrap()
         
-        leaf_blocks = []
-        for block in all_blocks:
-            # もしブロックの内部に他のターゲットタグが存在しないなら、それは末端要素
-            if not block.find_all(target_tags):
-                leaf_blocks.append(block)
-
+        # 3. Find all terminal block tags that likely contain prose.
+        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
+        
         all_sentences = []
-        for block in leaf_blocks:
+        for block in content_blocks:
+            # Get text from each individual block.
             block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
             if not block_text:
                 continue
 
+            # Split the block's text by punctuation.
             sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
             all_sentences.extend(sentences_in_block)
 
+        # 4. Final cleaning and filtering.
         clean_sentences = []
         for s in all_sentences:
             s = s.strip()
+            # Filter out short or boilerplate sentences.
             if len(s) > 10 and "ページの先頭へ戻る" not in s and "Adobe Reader" not in s:
                 clean_sentences.append(s)
         
-        # バイト数制限チェックと、長すぎる場合の再分割
+        # 5. Ensure final sentences do not exceed the byte limit.
         for sentence in clean_sentences:
             if len(sentence.encode('utf-8')) > safe_byte_limit:
                 for i in range(0, len(sentence), char_chunk_size):
@@ -61,6 +71,9 @@ def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_siz
         raise RuntimeError(f"HTML parsing error: {e}")
 
 def filter_sentences_with_oov(sentences: list) -> list:
+    """
+    Filters a list of sentences, returning only those that contain at least one Out-of-Vocabulary (OOV) word.
+    """
     global _WORKER_TOKENIZER
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
@@ -74,8 +87,16 @@ def filter_sentences_with_oov(sentences: list) -> list:
             print(f"  [!] Sudachi pre-filtering error: {e}", file=sys.stderr)
     return interesting_sentences
 
+# --- Main worker function executed in each process ---
 def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeout, safe_byte_limit, char_chunk_size):
-    url_id, url, old_hash, old_last_modified, old_etag = queue_item['id'], queue_item['url'], queue_item.get('content_hash'), queue_item.get('last_modified'), queue_item.get('etag')
+    """
+    Downloads a URL, checks for changes, and if new/updated, extracts and pre-filters sentences.
+    """
+    url_id, url = queue_item['id'], queue_item['url']
+    old_hash = queue_item.get('content_hash')
+    old_last_modified = queue_item.get('last_modified')
+    old_etag = queue_item.get('etag')
+
     supabase = create_client(supabase_url, supabase_key)
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
@@ -141,6 +162,7 @@ def worker_preprocess_url(queue_item, supabase_url, supabase_key, request_timeou
         supabase.table("crawl_queue").update({"extraction_status": "failed", "error_message": str(e)}).eq("id", url_id).execute()
         return False
 
+# --- Main process orchestrator ---
 def main():
     config = configparser.ConfigParser(); config.read('config.ini')
     max_workers = config.getint('Preprocessor', 'MAX_WORKERS')
@@ -151,7 +173,7 @@ def main():
     
     supabase_url, supabase_key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY")
     supabase = create_client(supabase_url, supabase_key)
-    print("--- Text Extraction Process Started (Leaf Node Extraction) ---")
+    print("--- Text Extraction Process Started ---")
 
     while True:
         res = supabase.table("crawl_queue").select("id, url, content_hash, last_modified, etag").eq("extraction_status", "queued").limit(batch_size).execute()
