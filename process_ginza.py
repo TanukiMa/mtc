@@ -5,7 +5,7 @@ from db_utils import SentenceQueue
 
 def load_ginza_model():
     """GiNZAモデルをロードする"""
-    return spacy.load("ja_ginza")
+    return spacy.load("ja_ginza_electra")
 
 def process_batch_with_ginza(sentences, nlp):
     """
