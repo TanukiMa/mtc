@@ -1,4 +1,10 @@
-import os, sys, re, time, configparser, requests, hashlib
+import os
+import sys
+import re
+import time
+import configparser
+import requests
+import hashlib
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from bs4 import BeautifulSoup
@@ -36,7 +42,12 @@ def init_worker(dict_type: str):
 
 # --- Helper Functions ---
 def extract_and_split_sentences(content: bytes, min_len: int) -> list:
-    final_sentences = []
+    """
+    HTMLからテキストを抽出し、長文を安全なチャンクに分割してから文分割する
+    """
+    # SudachiPyの安全なバイト数上限より少し小さい値を設定
+    SAFE_CHUNK_BYTES = 40000
+
     try:
         soup = BeautifulSoup(content, 'html5lib')
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
@@ -47,18 +58,31 @@ def extract_and_split_sentences(content: bytes, min_len: int) -> list:
         if not _WORKER_TOKENIZER:
              raise RuntimeError("Tokenizer is not initialized in worker.")
         
-        sentences = [str(s) for s in _WORKER_TOKENIZER.tokenize(all_text, mode=tokenizer.Tokenizer.SplitMode.A)]
+        # テキスト全体を一度に渡さず、チャンクに分割して処理する
+        all_sentences_from_text = []
+        text_bytes = all_text.encode('utf-8')
+        start = 0
+        while start < len(text_bytes):
+            end = start + SAFE_CHUNK_BYTES
+            # UTF-8の文字境界を壊さないように、バイトの開始位置を調整
+            while end < len(text_bytes) and (text_bytes[end] & 0xC0) == 0x80:
+                end -= 1
+            
+            chunk_str = text_bytes[start:end].decode('utf-8', 'ignore')
+            sentences_in_chunk = [str(s) for s in _WORKER_TOKENIZER.tokenize(chunk_str, mode=tokenizer.Tokenizer.SplitMode.A)]
+            all_sentences_from_text.extend(sentences_in_chunk)
+            start = end
 
+        # 文のクリーンアップ処理
         clean_sentences = []
-        for s in sentences:
+        for s in all_sentences_from_text:
             s = re.sub(r'\s+', ' ', s).strip()
             if len(s) >= min_len and not any(pat in s for pat in _WORK_BOILERPLATE_PATTERNS):
                 clean_sentences.append(s)
         
         return clean_sentences
     except Exception as e:
-        # HTML解析エラーは致命的ではないため、空リストを返して処理を続行
-        print(f"   [!] HTML parsing error: {e}", file=sys.stderr)
+        print(f"   [!] HTML parsing or sentence splitting error: {e}", file=sys.stderr)
         return []
 
 # --- Main worker function ---
