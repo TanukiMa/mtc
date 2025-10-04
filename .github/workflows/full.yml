@@ -67,7 +67,7 @@ jobs:
         env:
           LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
         run: |
-          python process_ginza.py &
+          python process_ginza.py ;
           python process_stanza.py &
           wait
 
