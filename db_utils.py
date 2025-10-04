@@ -58,6 +58,13 @@ class StopWord(Base):
     word = Column(String, unique=True, nullable=False)
     reason = Column(String)
 
+class BoilerplatePattern(Base):
+    __tablename__ = 'boilerplate_patterns'
+    id = Column(BigInteger, primary_key=True)
+    pattern = Column(Text, nullable=False, unique=True)
+    reason = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
 def get_local_db_session():
     """Returns a new session to the local PostgreSQL database."""
     engine = create_engine(os.environ["LOCAL_DB_URL"])
