@@ -1,4 +1,4 @@
-# process_ginza.py
+# process_ginza.py (修正後の完全なコード)
 import spacy
 from process_common import run_processor
 from db_utils import SentenceQueue
@@ -9,12 +9,21 @@ def load_ginza_model():
 
 def process_batch_with_ginza(sentences, nlp):
     """
-    GiNZAを使って文章のバッチを処理する
-    （現在は処理するだけだが、将来的に単語抽出などの処理を追加できる）
+    GiNZAを使って文章のバッチを処理し、未知語のリストを返す
     """
-    # nlp.pipeはジェネレータを返すため、list()で実行を強制
-    docs = list(nlp.pipe(sentences))
-    # 例: for doc in docs: for token in doc: print(token.text, token.pos_)
+    discovered_words = []
+    docs = nlp.pipe(sentences)
+    
+    for doc in docs:
+        for token in doc:
+            # is_oovフラグがTrueの単語（未知語）のみを抽出
+            if token.is_oov:
+                discovered_words.append({
+                    "word": token.lemma_,  # 見出し語（基本形）
+                    "source_tool": "ginza",
+                    "pos_tag": token.pos_ # 品詞タグ
+                })
+    return discovered_words
 
 def main():
     run_processor(
