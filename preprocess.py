@@ -5,6 +5,8 @@ import time
 import configparser
 import requests
 import hashlib
+import csv
+import argparse  # --- 修正点: argparseをインポート ---
 from datetime import datetime, timezone
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from bs4 import BeautifulSoup
@@ -16,22 +18,13 @@ from sudachipy import tokenizer, dictionary
 # SQLAlchemy関連のインポート
 from db_utils import get_local_db_session, CrawlQueue, SentenceQueue, BoilerplatePattern
 
-# --- Globals for worker processes ---
+# (init_worker, extract_and_split_sentences は変更ありません)
 _WORKER_TOKENIZER = None
 _WORK_BOILERPLATE_PATTERNS = []
-
-# --- Worker Initializer (各ワーカープロセス起動時に一度だけ実行) ---
 def init_worker(dict_type: str):
-    """
-    ワーカープロセスのグローバル変数を初期化する
-    """
     global _WORKER_TOKENIZER, _WORK_BOILERPLATE_PATTERNS
-    
-    # 1. SudachiPy Tokenizerの初期化
     if _WORKER_TOKENIZER is None:
         _WORKER_TOKENIZER = dictionary.Dictionary(dict=dict_type).create()
-
-    # 2. 除外パターンの読み込み
     if not _WORK_BOILERPLATE_PATTERNS:
         session = get_local_db_session()
         try:
@@ -40,98 +33,75 @@ def init_worker(dict_type: str):
         finally:
             session.close()
 
-# --- Helper Functions ---
 def extract_and_split_sentences(content: bytes, min_len: int) -> list:
-    """
-    HTMLからテキストを抽出し、長文を安全なチャンクに分割してから文分割する
-    """
-    # SudachiPyの安全なバイト数上限より少し小さい値を設定
     SAFE_CHUNK_BYTES = 40000
-
     try:
         soup = BeautifulSoup(content, 'html5lib')
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
-        
         all_text = soup.get_text(separator="\n", strip=True)
-        
-        if not _WORKER_TOKENIZER:
-             raise RuntimeError("Tokenizer is not initialized in worker.")
-        
-        # テキスト全体を一度に渡さず、チャンクに分割して処理する
+        if not _WORKER_TOKENIZER: raise RuntimeError("Tokenizer is not initialized.")
         all_sentences_from_text = []
         text_bytes = all_text.encode('utf-8')
         start = 0
         while start < len(text_bytes):
             end = start + SAFE_CHUNK_BYTES
-            # UTF-8の文字境界を壊さないように、バイトの開始位置を調整
-            while end < len(text_bytes) and (text_bytes[end] & 0xC0) == 0x80:
-                end -= 1
-            
+            while end < len(text_bytes) and (text_bytes[end] & 0xC0) == 0x80: end -= 1
             chunk_str = text_bytes[start:end].decode('utf-8', 'ignore')
             sentences_in_chunk = [str(s) for s in _WORKER_TOKENIZER.tokenize(chunk_str, mode=tokenizer.Tokenizer.SplitMode.A)]
             all_sentences_from_text.extend(sentences_in_chunk)
             start = end
-
-        # 文のクリーンアップ処理
         clean_sentences = []
         for s in all_sentences_from_text:
             s = re.sub(r'\s+', ' ', s).strip()
             if len(s) >= min_len and not any(pat in s for pat in _WORK_BOILERPLATE_PATTERNS):
                 clean_sentences.append(s)
-        
         return clean_sentences
     except Exception as e:
         print(f"   [!] HTML parsing or sentence splitting error: {e}", file=sys.stderr)
         return []
 
 # --- Main worker function ---
-def worker_preprocess_url(queue_item_id: int, request_timeout: int, min_sentence_length: int) -> tuple:
-    """
-    単一のURLを処理するワーカー関数。完全に独立したDBセッションを持つ。
-    """
+# --- 修正点: is_debug_mode 引数を追加 ---
+def worker_preprocess_url(queue_item_id: int, request_timeout: int, min_sentence_length: int, is_debug_mode: bool) -> tuple:
     session = get_local_db_session()
+    url_to_process = ""
     try:
-        # --- トランザクション開始: まず対象行をロックして取得 ---
         queue_item = session.query(CrawlQueue).filter(
             CrawlQueue.id == queue_item_id,
             CrawlQueue.extraction_status == 'queued'
         ).with_for_update(skip_locked=True).one_or_none()
 
-        # 他のプロセスにロックされたか、既に対象でなくなっていた場合は何もせず終了
         if not queue_item:
-            return queue_item_id, "skipped", 0
+            # --- 修正点: is_debug_modeに応じて戻り値の形式を変える ---
+            return (queue_item_id, "skipped", url_to_process, []) if is_debug_mode else (queue_item_id, "skipped")
         
-        # 処理中にステータスを変更
+        url_to_process = queue_item.url
         queue_item.extraction_status = 'processing'
         session.commit()
 
-        # --- HTTPリクエストとHTML解析 ---
-        url = queue_item.url
+        # ... (HTTPリクエストとHTML解析) ...
         http_session = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         http_session.mount('https://', HTTPAdapter(max_retries=retries))
-
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = http_session.get(url, timeout=request_timeout, headers=headers, allow_redirects=True)
+        response = http_session.get(url_to_process, timeout=request_timeout, headers=headers, allow_redirects=True)
         response.raise_for_status()
-        
         content_type = response.headers.get("content-type", "").lower()
+
         if "html" not in content_type:
             queue_item.extraction_status = "completed"
             session.commit()
-            return queue_item_id, "completed_non_html", 0
+            return (queue_item_id, "completed_non_html", url_to_process, []) if is_debug_mode else (queue_item_id, "completed_non_html")
 
         new_hash = hashlib.sha256(response.content).hexdigest()
         if queue_item.content_hash and queue_item.content_hash == new_hash:
             queue_item.extraction_status = "completed"
             session.commit()
-            return queue_item_id, "completed_not_modified", 0
+            return (queue_item_id, "completed_not_modified", url_to_process, []) if is_debug_mode else (queue_item_id, "completed_not_modified")
 
-        # --- テキスト抽出とDB保存 ---
         sentences = extract_and_split_sentences(response.content, min_sentence_length)
         
-        # 既存の文章を一度削除
         session.query(SentenceQueue).filter_by(crawl_queue_id=queue_item.id).delete(synchronize_session=False)
         
         if sentences:
@@ -141,28 +111,31 @@ def worker_preprocess_url(queue_item_id: int, request_timeout: int, min_sentence
         queue_item.content_hash = new_hash
         queue_item.processed_at = datetime.now(timezone.utc)
         session.commit()
-        return queue_item_id, "completed_success", len(sentences)
+        return (queue_item_id, "completed_success", url_to_process, sentences) if is_debug_mode else (queue_item_id, "completed_success")
 
     except Exception as e:
-        # エラー発生時はロールバックし、ステータスを'failed'に更新
-        if session.is_active:
-            session.rollback()
-        
-        # 新しいセッションで失敗ステータスを記録
+        if session.is_active: session.rollback()
         error_session = get_local_db_session()
         try:
             error_session.query(CrawlQueue).filter_by(id=queue_item_id).update({"extraction_status": "failed"})
             error_session.commit()
         finally:
             error_session.close()
-            
-        return queue_item_id, f"failed: {e}", 0
+        return (queue_item_id, f"failed: {e}", url_to_process, []) if is_debug_mode else (queue_item_id, f"failed: {e}")
     finally:
         if session.is_active:
             session.close()
 
 # --- Main process orchestrator ---
 def main():
+    # --- 修正点: コマンドライン引数を解析 ---
+    parser = argparse.ArgumentParser(description="Preprocess URLs from the crawl queue.")
+    parser.add_argument('--debug', action='store_true', help="Enable debug mode to output a CSV artifact.")
+    args = parser.parse_args()
+
+    if args.debug:
+        print("[*] Debug mode enabled. A CSV artifact will be generated.")
+
     config = configparser.ConfigParser()
     config.read('config.ini')
     max_workers = config.getint('Preprocessor', 'MAX_WORKERS')
@@ -173,10 +146,12 @@ def main():
     
     session = get_local_db_session()
     print("--- Text Extraction Process Started ---")
+    
+    # --- 修正点: デバッグモードの時だけリストを初期化 ---
+    debug_results_for_csv = [] if args.debug else None
 
     try:
         while True:
-            # メインプロセスは処理対象のIDリストを取得するだけ
             items_to_process = session.query(CrawlQueue.id).filter(
                 CrawlQueue.extraction_status == 'queued'
             ).order_by(CrawlQueue.id).limit(batch_size).all()
@@ -189,24 +164,25 @@ def main():
             print(f"[*] Processing batch of {len(ids_to_process)} URLs...")
 
             with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=(sudachi_dict_type,)) as executor:
-                futures = [executor.submit(worker_preprocess_url, item_id, req_timeout, min_sentence_length) for item_id in ids_to_process]
+                # --- 修正点: is_debug_modeフラグをワーカーに渡す ---
+                futures = [executor.submit(worker_preprocess_url, item_id, req_timeout, min_sentence_length, args.debug) for item_id in ids_to_process]
                 
                 for future in futures:
                     try:
-                        # ワーカーからの結果を受け取る（必要に応じてログ出力など）
-                        item_id, status, count = future.result(timeout=req_timeout + 60)
-                        if "failed" in status:
-                             print(f"   [!] Worker for ID {item_id} failed. Reason: {status}")
-                    except TimeoutError:
-                        print(f"   [!] A worker process timed out.", file=sys.stderr)
-                    except Exception as e:
-                        print(f"   [!] A future raised an exception: {e}", file=sys.stderr)
-            
-            print(f"   [+] Batch complete.")
-    finally:
-        session.close()
-    
-    print("--- Text Extraction Process Finished ---")
+                        result = future.result(timeout=req_timeout + 60)
+                        
+                        # --- 修正点: デバッグモードの場合のみ結果を詳細に処理 ---
+                        if args.debug:
+                            item_id, status, url, extracted_sentences = result
+                            if "failed" in status:
+                                print(f"   [!] Worker for ID {item_id} failed. Reason: {status}")
+                            if extracted_sentences:
+                                for sentence in extracted_sentences:
+                                    debug_results_for_csv.append({"url": url, "sentence": sentence})
+                        else:
+                            item_id, status = result
+                            if "failed" in status:
+                                print(f"   [!] Worker for ID {item_id} failed. Reason: {status}")
 
-if __name__ == "__main__":
-    main()
+                    except TimeoutError:
+                        print(f"   [!] A

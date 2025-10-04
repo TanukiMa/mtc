@@ -1,12 +1,17 @@
-# .github/workflows/full.yml
 name: Local DB Pipeline (Discover, Preprocess, Process, Sync)
 
 on:
   workflow_dispatch:
+    inputs:
+      debug_preprocess:
+        description: 'Run preprocessor in debug mode (generates CSV artifact)'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   run_pipeline:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     
     services:
       postgres:
@@ -26,6 +31,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -33,7 +39,7 @@ jobs:
 
       - name: Install all dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client postgresql-client-16
+          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client
           pip install -r requirements.txt
 
       - name: Wait for PostgreSQL
@@ -61,13 +67,27 @@ jobs:
       - name: 3. Run Preprocessor
         env:
           LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
-        run: python preprocess.py
+        run: |
+          if [[ "${{ github.event.inputs.debug_preprocess }}" == "true" ]]; then
+            echo "Running preprocessor in debug mode..."
+            python preprocess.py --debug
+          else
+            echo "Running preprocessor in production mode..."
+            python preprocess.py
+          fi
+
+      - name: Upload Preprocess Debug Log
+        if: ${{ github.event.inputs.debug_preprocess == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: preprocess-debug-log-${{ github.run_id }}
+          path: preprocess_debug_output.csv
 
       - name: 4. Run NLP Processors in Parallel
         env:
           LOCAL_DB_URL: "postgresql://runner:password@localhost:5432/localdb"
         run: |
-          python process_ginza.py ;
+          python process_ginza.py &
           python process_stanza.py &
           wait
 
