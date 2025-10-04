@@ -1,7 +1,6 @@
-# preprocess.py
 import os, sys, re, time, configparser, requests, hashlib
 from datetime import datetime, timezone
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from bs4 import BeautifulSoup
 import chardet
 from requests.adapters import HTTPAdapter
@@ -9,74 +8,82 @@ from urllib3.util.retry import Retry
 from sudachipy import tokenizer, dictionary
 
 # SQLAlchemy関連のインポート
-from sqlalchemy.orm import joinedload
-from db_utils import get_local_db_session, CrawlQueue, SentenceQueue
+from db_utils import get_local_db_session, CrawlQueue, SentenceQueue, BoilerplatePattern
 
 # --- Globals for worker processes ---
 _WORKER_TOKENIZER = None
+_WORK_BOILERPLATE_PATTERNS = []
+
+# --- Worker Initializer (各ワーカープロセス起動時に一度だけ実行) ---
+def init_worker(dict_type: str):
+    """
+    ワーカープロセスのグローバル変数を初期化する
+    """
+    global _WORKER_TOKENIZER, _WORK_BOILERPLATE_PATTERNS
+    
+    # 1. SudachiPy Tokenizerの初期化
+    if _WORKER_TOKENIZER is None:
+        _WORKER_TOKENIZER = dictionary.Dictionary(dict=dict_type).create()
+
+    # 2. 除外パターンの読み込み
+    if not _WORK_BOILERPLATE_PATTERNS:
+        session = get_local_db_session()
+        try:
+            patterns = session.query(BoilerplatePattern).all()
+            _WORK_BOILERPLATE_PATTERNS = [p.pattern for p in patterns]
+        finally:
+            session.close()
 
 # --- Helper Functions ---
-def get_sentences_from_html(content: bytes, safe_byte_limit: int, char_chunk_size: int) -> list:
+def extract_and_split_sentences(content: bytes, min_len: int) -> list:
     final_sentences = []
     try:
         soup = BeautifulSoup(content, 'html5lib')
         for s in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
             s.decompose()
         
-        for tag in soup.find_all(['div', 'ul', 'ol', 'table', 'tbody', 'tr']):
-            tag.unwrap()
+        all_text = soup.get_text(separator="\n", strip=True)
         
-        content_blocks = soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'th', 'td'])
+        if not _WORKER_TOKENIZER:
+             raise RuntimeError("Tokenizer is not initialized in worker.")
         
-        all_sentences = []
-        for block in content_blocks:
-            block_text = re.sub(r'\s+', ' ', block.get_text(strip=True))
-            if not block_text:
-                continue
-            sentences_in_block = re.split(r'(?<=[。！？])\s*', block_text)
-            all_sentences.extend(sentences_in_block)
+        sentences = [str(s) for s in _WORKER_TOKENIZER.tokenize(all_text, mode=tokenizer.Tokenizer.SplitMode.A)]
 
         clean_sentences = []
-        for s in all_sentences:
-            s = s.strip()
-            if len(s) > 10 and "ページの先頭へ戻る" not in s:
+        for s in sentences:
+            s = re.sub(r'\s+', ' ', s).strip()
+            if len(s) >= min_len and not any(pat in s for pat in _WORK_BOILERPLATE_PATTERNS):
                 clean_sentences.append(s)
         
-        for sentence in clean_sentences:
-            if len(sentence.encode('utf-8')) > safe_byte_limit:
-                for i in range(0, len(sentence), char_chunk_size):
-                    final_sentences.append(sentence[i:i + char_chunk_size])
-            else:
-                final_sentences.append(sentence)
-        
-        return final_sentences
+        return clean_sentences
     except Exception as e:
-        raise RuntimeError(f"HTML parsing error: {e}")
-
-def filter_sentences_with_oov(sentences: list) -> list:
-    global _WORKER_TOKENIZER
-    if _WORKER_TOKENIZER is None:
-        _WORKER_TOKENIZER = dictionary.Dictionary(dict="full").create(mode=tokenizer.Tokenizer.SplitMode.C)
-    
-    interesting_sentences = []
-    for sentence in sentences:
-        try:
-            if any(m.is_oov() for m in _WORKER_TOKENIZER.tokenize(sentence)):
-                interesting_sentences.append(sentence)
-        except Exception as e:
-            print(f"  [!] Sudachi pre-filtering error: {e}", file=sys.stderr)
-    return interesting_sentences
+        # HTML解析エラーは致命的ではないため、空リストを返して処理を続行
+        print(f"   [!] HTML parsing error: {e}", file=sys.stderr)
+        return []
 
 # --- Main worker function ---
-def worker_preprocess_url(queue_item_id, request_timeout, safe_byte_limit, char_chunk_size):
+def worker_preprocess_url(queue_item_id: int, request_timeout: int, min_sentence_length: int) -> tuple:
+    """
+    単一のURLを処理するワーカー関数。完全に独立したDBセッションを持つ。
+    """
     session = get_local_db_session()
     try:
-        queue_item = session.query(CrawlQueue).filter_by(id=queue_item_id).one_or_none()
-        if not queue_item:
-            return
+        # --- トランザクション開始: まず対象行をロックして取得 ---
+        queue_item = session.query(CrawlQueue).filter(
+            CrawlQueue.id == queue_item_id,
+            CrawlQueue.extraction_status == 'queued'
+        ).with_for_update(skip_locked=True).one_or_none()
 
-        url = queue_item.url
+        # 他のプロセスにロックされたか、既に対象でなくなっていた場合は何もせず終了
+        if not queue_item:
+            return queue_item_id, "skipped", 0
         
+        # 処理中にステータスを変更
+        queue_item.extraction_status = 'processing'
+        session.commit()
+
+        # --- HTTPリクエストとHTML解析 ---
+        url = queue_item.url
         http_session = requests.Session()
         retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
         http_session.mount('https://', HTTPAdapter(max_retries=retries))
@@ -89,74 +96,92 @@ def worker_preprocess_url(queue_item_id, request_timeout, safe_byte_limit, char_
         if "html" not in content_type:
             queue_item.extraction_status = "completed"
             session.commit()
-            return
+            return queue_item_id, "completed_non_html", 0
 
-        if response.encoding == 'ISO-8859-1':
-            encoding = chardet.detect(response.content)['encoding']
-            if encoding:
-                response.encoding = encoding
-                
         new_hash = hashlib.sha256(response.content).hexdigest()
-
         if queue_item.content_hash and queue_item.content_hash == new_hash:
             queue_item.extraction_status = "completed"
             session.commit()
-            return
+            return queue_item_id, "completed_not_modified", 0
 
-        sentences = get_sentences_from_html(response.content, safe_byte_limit, char_chunk_size)
+        # --- テキスト抽出とDB保存 ---
+        sentences = extract_and_split_sentences(response.content, min_sentence_length)
         
+        # 既存の文章を一度削除
         session.query(SentenceQueue).filter_by(crawl_queue_id=queue_item.id).delete(synchronize_session=False)
         
         if sentences:
-            interesting_sentences = filter_sentences_with_oov(sentences)
-            if interesting_sentences:
-                session.bulk_insert_mappings(SentenceQueue, [{"crawl_queue_id": queue_item.id, "sentence_text": s} for s in interesting_sentences])
+            session.bulk_insert_mappings(SentenceQueue, [{"crawl_queue_id": queue_item.id, "sentence_text": s} for s in sentences])
 
         queue_item.extraction_status = "completed"
         queue_item.content_hash = new_hash
-        queue_item.last_modified = response.headers.get('Last-Modified')
-        queue_item.etag = response.headers.get('ETag')
         queue_item.processed_at = datetime.now(timezone.utc)
         session.commit()
+        return queue_item_id, "completed_success", len(sentences)
 
     except Exception as e:
-        print(f"  [!] Preprocessing error on URL ID {queue_item_id}: {e}", file=sys.stderr)
-        session.rollback()
-        session.query(CrawlQueue).filter_by(id=queue_item_id).update({"extraction_status": "failed"})
-        session.commit()
+        # エラー発生時はロールバックし、ステータスを'failed'に更新
+        if session.is_active:
+            session.rollback()
+        
+        # 新しいセッションで失敗ステータスを記録
+        error_session = get_local_db_session()
+        try:
+            error_session.query(CrawlQueue).filter_by(id=queue_item_id).update({"extraction_status": "failed"})
+            error_session.commit()
+        finally:
+            error_session.close()
+            
+        return queue_item_id, f"failed: {e}", 0
     finally:
-        session.close()
+        if session.is_active:
+            session.close()
 
 # --- Main process orchestrator ---
 def main():
-    config = configparser.ConfigParser(); config.read('config.ini')
+    config = configparser.ConfigParser()
+    config.read('config.ini')
     max_workers = config.getint('Preprocessor', 'MAX_WORKERS')
     batch_size = config.getint('Preprocessor', 'BATCH_SIZE')
     req_timeout = config.getint('General', 'REQUEST_TIMEOUT')
-    safe_byte_limit = config.getint('Preprocessor', 'SAFE_BYTE_LIMIT')
-    char_chunk_size = config.getint('Preprocessor', 'CHAR_CHUNK_SIZE')
+    sudachi_dict_type = config.get('Preprocessor', 'SUDACHI_DICT_TYPE', fallback='full')
+    min_sentence_length = config.getint('Preprocessor', 'MIN_SENTENCE_LENGTH', fallback=10)
     
     session = get_local_db_session()
-    print("--- Text Extraction Process Started (Local DB Mode) ---")
+    print("--- Text Extraction Process Started ---")
 
-    while True:
-        items_to_process = session.query(CrawlQueue.id).filter_by(extraction_status='queued').limit(batch_size).all()
-        if not items_to_process:
-            print("[*] No URLs to preprocess in queue. Exiting.")
-            break
-        
-        ids_to_process = [item.id for item in items_to_process]
-        
-        session.query(CrawlQueue).filter(CrawlQueue.id.in_(ids_to_process)).update({"extraction_status": "processing"}, synchronize_session=False)
-        session.commit()
-        print(f"[*] Locked {len(ids_to_process)} URLs for extraction.")
+    try:
+        while True:
+            # メインプロセスは処理対象のIDリストを取得するだけ
+            items_to_process = session.query(CrawlQueue.id).filter(
+                CrawlQueue.extraction_status == 'queued'
+            ).order_by(CrawlQueue.id).limit(batch_size).all()
+            
+            if not items_to_process:
+                print("[*] No URLs to preprocess in queue. Exiting.")
+                break
+            
+            ids_to_process = [item.id for item in items_to_process]
+            print(f"[*] Processing batch of {len(ids_to_process)} URLs...")
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_preprocess_url, item_id, req_timeout, safe_byte_limit, char_chunk_size) for item_id in ids_to_process]
-            results = [f.result() for f in futures]
-            print(f"  [+] Batch of {len(futures)} tasks complete.")
+            with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=(sudachi_dict_type,)) as executor:
+                futures = [executor.submit(worker_preprocess_url, item_id, req_timeout, min_sentence_length) for item_id in ids_to_process]
+                
+                for future in futures:
+                    try:
+                        # ワーカーからの結果を受け取る（必要に応じてログ出力など）
+                        item_id, status, count = future.result(timeout=req_timeout + 60)
+                        if "failed" in status:
+                             print(f"   [!] Worker for ID {item_id} failed. Reason: {status}")
+                    except TimeoutError:
+                        print(f"   [!] A worker process timed out.", file=sys.stderr)
+                    except Exception as e:
+                        print(f"   [!] A future raised an exception: {e}", file=sys.stderr)
+            
+            print(f"   [+] Batch complete.")
+    finally:
+        session.close()
     
-    session.close()
     print("--- Text Extraction Process Finished ---")
 
 if __name__ == "__main__":
