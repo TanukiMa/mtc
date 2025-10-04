@@ -1,4 +1,3 @@
-# process_common.py
 import time
 import datetime
 import configparser
@@ -61,10 +60,10 @@ def run_processor(processor_name, model_loader_func, batch_processor_func, db_st
             ids_to_process = [item.id for item in items_to_process]
             sentences_to_process = [item.sentence_text for item in items_to_process]
 
-            # 取得したバッチを「処理中」に更新してロック
+            # 修正点：動的なカラム名でロックする
             session.query(SentenceQueue).filter(
                 SentenceQueue.id.in_(ids_to_process)
-            ).update({"status": "processing"}, synchronize_session=False)
+            ).update({db_status_column.name: "processing"}, synchronize_session=False)
             session.commit()
             
             # --- NLPライブラリ固有のバッチ処理を実行 ---
@@ -72,14 +71,14 @@ def run_processor(processor_name, model_loader_func, batch_processor_func, db_st
                 batch_processor_func(sentences_to_process, nlp_model)
                 # ここで解析結果（単語など）を別テーブルに保存するロジックを追加可能
                 
-                # 処理が成功した行を「完了」に更新
+                # 修正点：動的なカラム名で「完了」に更新する
                 session.query(SentenceQueue).filter(
                     SentenceQueue.id.in_(ids_to_process)
                 ).update({db_status_column.name: "completed"}, synchronize_session=False)
 
             except Exception as e:
                 print(f"\n[!] Error processing batch: {e}", file=sys.stderr)
-                # エラーが発生した行を「失敗」に更新
+                # 修正点：エラー時も動的なカラム名で更新
                 session.query(SentenceQueue).filter(
                     SentenceQueue.id.in_(ids_to_process)
                 ).update({db_status_column.name: "failed"}, synchronize_session=False)
@@ -89,6 +88,7 @@ def run_processor(processor_name, model_loader_func, batch_processor_func, db_st
             print(f"\r[*] Processed batches: {total_processed_count // batch_size} ({total_processed_count} sentences)", end="")
 
     except Exception as e:
+        # 修正点：ログメッセージも動的にする
         print(f"\n[!] A critical error occurred in {processor_name} processor: {e}", file=sys.stderr)
         if session.is_active:
             session.rollback()
