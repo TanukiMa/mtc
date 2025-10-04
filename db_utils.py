@@ -1,6 +1,6 @@
 # db_utils.py
 import os
-from sqlalchemy import create_engine, text, Column, Integer, String, Enum, DateTime, ForeignKey
+from sqlalchemy import create_engine, text, Column, BigInteger, String, Enum, DateTime, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.schema import UniqueConstraint
