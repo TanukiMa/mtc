@@ -78,3 +78,18 @@ class BoilerplatePattern(Base):
     pattern = Column(Text, nullable=False, unique=True)
     reason = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+class UniqueWord(Base):
+    __tablename__ = 'unique_words'
+    id = Column(BigInteger, primary_key=True)
+    word = Column(Text, nullable=False)
+    source_tool = Column(Text, nullable=False)
+    entity_category = Column(Text)
+    pos_tag = Column(Text)
+    discovered_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+class WordOccurrence(Base):
+    __tablename__ = 'word_occurrences'
+    id = Column(BigInteger, primary_key=True)
+    word_id = Column(BigInteger, nullable=False) # FK制約はモデル上では省略
+    source_url = Column(Text, nullable=False)
