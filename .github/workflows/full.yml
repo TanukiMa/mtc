@@ -33,7 +33,7 @@ jobs:
 
       - name: Install all dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client
+          sudo apt-get update && sudo apt-get install -yf libpq-dev postgresql-client postgresql-client-16
           pip install -r requirements.txt
 
       - name: Wait for PostgreSQL
