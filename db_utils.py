@@ -12,14 +12,18 @@ _supabase_client = None
 
 def get_supabase_client() -> Client:
     """
-    Returns a singleton instance of the Supabase client.
+    環境変数から接続情報を直接読み取り、Supabaseクライアントを返す
     """
     global _supabase_client
     if _supabase_client is None:
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-        url = config['Supabase']['URL']
-        key = config['Supabase']['ANON_KEY']
+        # --- 修正点: config.iniからではなく、os.environから直接読み込む ---
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+
+        # 環境変数が設定されていない場合にエラーを出す
+        if not url or not key:
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables must be set.")
+            
         _supabase_client = create_client(url, key)
     return _supabase_client
 
