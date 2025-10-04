@@ -19,7 +19,7 @@ class ProcessStatus(enum.Enum):
 
 class CrawlQueue(Base):
     __tablename__ = 'crawl_queue'
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     url = Column(String, unique=True, nullable=False)
     extraction_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
     content_hash = Column(String)
@@ -29,8 +29,8 @@ class CrawlQueue(Base):
 
 class SentenceQueue(Base):
     __tablename__ = 'sentence_queue'
-    id = Column(Integer, primary_key=True)
-    crawl_queue_id = Column(Integer, ForeignKey('crawl_queue.id', ondelete='CASCADE'), nullable=False)
+    id = Column(BigInteger, primary_key=True)
+    crawl_queue_id = Column(BigInteger, ForeignKey('crawl_queue.id', ondelete='CASCADE'), nullable=False)
     sentence_text = Column(String, nullable=False)
     ginza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
     stanza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
@@ -38,7 +38,7 @@ class SentenceQueue(Base):
 
 class UniqueWord(Base):
     __tablename__ = 'unique_words'
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     word = Column(String, nullable=False)
     source_tool = Column(String, nullable=False)
     entity_category = Column(String)
@@ -47,14 +47,14 @@ class UniqueWord(Base):
 
 class WordOccurrence(Base):
     __tablename__ = 'word_occurrences'
-    id = Column(Integer, primary_key=True)
-    word_id = Column(Integer, ForeignKey('unique_words.id', ondelete='CASCADE'), nullable=False)
+    id = Column(BigInteger, primary_key=True)
+    word_id = Column(BigInteger, ForeignKey('unique_words.id', ondelete='CASCADE'), nullable=False)
     source_url = Column(String, nullable=False)
     __table_args__ = (UniqueConstraint('word_id', 'source_url', name='unique_occurrence'),)
 
 class StopWord(Base):
     __tablename__ = 'stop_words'
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     word = Column(String, unique=True, nullable=False)
     reason = Column(String)
 
