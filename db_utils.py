@@ -1,80 +1,80 @@
 # db_utils.py
 import os
-from sqlalchemy import create_engine, text, Column, BigInteger, String, Enum, DateTime, ForeignKey
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.schema import UniqueConstraint
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
+import configparser
+from sqlalchemy import create_engine, Column, BigInteger, Text, TIMESTAMP, Enum
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.sql import func
 from supabase import create_client, Client
-import enum
 
-# --- SQLAlchemy Setup ---
+# --- Supabase Client ---
+_supabase_client = None
+
+def get_supabase_client() -> Client:
+    """
+    Returns a singleton instance of the Supabase client.
+    """
+    global _supabase_client
+    if _supabase_client is None:
+        config = configparser.ConfigParser()
+        config.read('config.ini')
+        url = config['Supabase']['URL']
+        key = config['Supabase']['ANON_KEY']
+        _supabase_client = create_client(url, key)
+    return _supabase_client
+
+# --- SQLAlchemy Local DB Setup ---
 Base = declarative_base()
+_local_session_factory = None
 
-class ProcessStatus(enum.Enum):
-    queued = 'queued'
-    processing = 'processing'
-    completed = 'completed'
-    failed = 'failed'
+def get_local_db_session():
+    """
+    Returns a session for the local PostgreSQL database.
+    """
+    global _local_session_factory
+    if _local_session_factory is None:
+        db_url = os.environ.get("LOCAL_DB_URL")
+        if not db_url:
+            raise ValueError("Environment variable LOCAL_DB_URL is not set.")
+        engine = create_engine(db_url)
+        _local_session_factory = sessionmaker(bind=engine)
+    return _local_session_factory()
+
+# --- ORM Model Classes ---
+ProcessStatusEnum = Enum('queued', 'processing', 'completed', 'failed', name='process_status_enum')
 
 class CrawlQueue(Base):
     __tablename__ = 'crawl_queue'
     id = Column(BigInteger, primary_key=True)
-    url = Column(String, unique=True, nullable=False)
-    extraction_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
-    content_hash = Column(String)
-    last_modified = Column(String)
-    etag = Column(String)
-    processed_at = Column(DateTime)
+    url = Column(Text, nullable=False, unique=True)
+    extraction_status = Column(ProcessStatusEnum, nullable=False, default='queued')
+    content_hash = Column(Text)
+    last_modified = Column(Text)
+    etag = Column(Text)
+    processed_at = Column(TIMESTAMP(timezone=True))
 
 class SentenceQueue(Base):
     __tablename__ = 'sentence_queue'
     id = Column(BigInteger, primary_key=True)
-    crawl_queue_id = Column(BigInteger, ForeignKey('crawl_queue.id', ondelete='CASCADE'), nullable=False)
-    sentence_text = Column(String, nullable=False)
-    ginza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
-    stanza_status = Column(Enum(ProcessStatus), nullable=False, default=ProcessStatus.queued)
-    crawl_queue = relationship("CrawlQueue")
-
-class UniqueWord(Base):
-    __tablename__ = 'unique_words'
-    id = Column(BigInteger, primary_key=True)
-    word = Column(String, nullable=False)
-    source_tool = Column(String, nullable=False)
-    entity_category = Column(String)
-    pos_tag = Column(String)
-    __table_args__ = (UniqueConstraint('word', 'source_tool', name='unique_word_per_tool'),)
-
-class WordOccurrence(Base):
-    __tablename__ = 'word_occurrences'
-    id = Column(BigInteger, primary_key=True)
-    word_id = Column(BigInteger, ForeignKey('unique_words.id', ondelete='CASCADE'), nullable=False)
-    source_url = Column(String, nullable=False)
-    __table_args__ = (UniqueConstraint('word_id', 'source_url', name='unique_occurrence'),)
+    crawl_queue_id = Column(BigInteger, nullable=False)
+    sentence_text = Column(Text, nullable=False)
+    ginza_status = Column(ProcessStatusEnum, nullable=False, default='queued')
+    stanza_status = Column(ProcessStatusEnum, nullable=False, default='queued')
 
 class StopWord(Base):
     __tablename__ = 'stop_words'
     id = Column(BigInteger, primary_key=True)
-    word = Column(String, unique=True, nullable=False)
-    reason = Column(String)
-
-class BoilerplatePattern(Base):
-    __tablename__ = 'boilerplate_patterns'
-    id = Column(BigInteger, primary_key=True)
-    pattern = Column(text, nullable=False, unique=True)
-    reason = Column(text)
+    word = Column(Text, nullable=False, unique=True)
+    reason = Column(Text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
-def get_local_db_session():
-    """Returns a new session to the local PostgreSQL database."""
-    engine = create_engine(os.environ["LOCAL_DB_URL"])
-    Session = sessionmaker(bind=engine)
-    return Session()
-
-def get_supabase_client() -> Client:
-    """Initializes and returns the Supabase client."""
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_KEY")
-    if not url or not key:
-        raise ValueError("Supabase credentials not provided.")
-    return create_client(url, key)
+class BoilerplatePattern(Base):
+    """
+    Model for storing boilerplate patterns to be excluded.
+    """
+    __tablename__ = 'boilerplate_patterns'
+    id = Column(BigInteger, primary_key=True)
+    # --- FIX: Changed 'text' to 'Text' ---
+    pattern = Column(Text, nullable=False, unique=True)
+    reason = Column(Text)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
