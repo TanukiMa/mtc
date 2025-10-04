@@ -61,8 +61,8 @@ class StopWord(Base):
 class BoilerplatePattern(Base):
     __tablename__ = 'boilerplate_patterns'
     id = Column(BigInteger, primary_key=True)
-    pattern = Column(Text, nullable=False, unique=True)
-    reason = Column(Text)
+    pattern = Column(text, nullable=False, unique=True)
+    reason = Column(text)
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 def get_local_db_session():
