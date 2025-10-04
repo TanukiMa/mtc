@@ -185,4 +185,27 @@ def main():
                                 print(f"   [!] Worker for ID {item_id} failed. Reason: {status}")
 
                     except TimeoutError:
-                        print(f"   [!] A
+                        print(f"   [!] A worker process timed out.", file=sys.stderr)
+                    except Exception as e:
+                        print(f"   [!] A future raised an exception: {e}", file=sys.stderr)
+            
+            print(f"   [+] Batch complete.")
+    finally:
+        session.close()
+
+    # --- 修正点: デバッグモードで、かつ結果がある場合のみCSVを書き出す ---
+    if args.debug and debug_results_for_csv:
+        print("\n[*] Writing debug artifact...")
+        try:
+            with open('preprocess_debug_output.csv', 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=["url", "sentence"])
+                writer.writeheader()
+                writer.writerows(debug_results_for_csv)
+            print("[+] Debug artifact written to 'preprocess_debug_output.csv'")
+        except Exception as e:
+            print(f"[!] Failed to write debug artifact: {e}", file=sys.stderr)
+
+    print("--- Text Extraction Process Finished ---")
+
+if __name__ == "__main__":
+    main()
